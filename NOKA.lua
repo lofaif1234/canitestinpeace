@@ -211,6 +211,29 @@ function M_Shell.check_tool(tool)
     return code == 0
 end
 
+-- =============================================================================
+-- ROOT MODULE (requires M_Shell.exec to be defined above)
+-- =============================================================================
+local ROOT = {}
+ROOT._available = nil
+
+function ROOT.check()
+    if ROOT._available ~= nil then return ROOT._available end
+    local f = io.popen("su -c 'echo ROOT_OK' 2>/dev/null")
+    local result = ""
+    if f then
+        result = f:read("*l") or ""
+        f:close()
+    end
+    ROOT._available = (result:find("ROOT_OK") ~= nil)
+    return ROOT._available
+end
+
+function ROOT.exec(cmd, timeout)
+    local su_cmd = string.format("su -c %q", cmd)
+    return M_Shell.exec(su_cmd, timeout or 30)
+end
+
 function M_Shell.get_package_list()
     local stdout, _, code = ROOT.exec("pm list packages | grep -E '^package:com\\.roblo'")
     if code == 0 then
