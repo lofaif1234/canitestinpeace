@@ -212,7 +212,7 @@ function M_Shell.check_tool(tool)
 end
 
 function M_Shell.get_package_list()
-    local stdout, _, code = M_Shell.exec("pm list packages | grep -E '^package:com\\.roblox'")
+    local stdout, _, code = ROOT.exec("pm list packages | grep -E '^package:com\\.roblo'")
     if code == 0 then
         local packages = {}
         for line in stdout:gmatch("package:([^\n]+)") do
@@ -224,7 +224,7 @@ function M_Shell.get_package_list()
 end
 
 function M_Shell.get_all_game_clients()
-    local stdout, _, code = M_Shell.exec("pm list packages | grep -E '(game|roblox|minecraft)'")
+    local stdout, _, code = ROOT.exec("pm list packages | grep -E '(roblo|minecraft)'")
     if code == 0 then
         local packages = {}
         for line in stdout:gmatch("package:([^\n]+)") do
