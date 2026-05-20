@@ -443,6 +443,19 @@ function M_UI.header()
     M_UI.status_bar()
 end
 
+-- TTY handle: reopen /dev/tty so input always comes from the real terminal
+-- even when the script is piped via: curl ... | luajit -
+local _tty = io.open("/dev/tty", "r+")
+if not _tty then
+    _tty = io.stdin
+end
+
+function M_UI.read_line()
+    io.flush()
+    local line = _tty:read("*l")
+    return line
+end
+
 function M_UI.main_menu()
     M_UI.header()
     print(M_UI.color("bold", M_UI.color("cyan", "=== MAIN MENU ===")))
@@ -459,15 +472,13 @@ function M_UI.main_menu()
     print("0) Exit")
     print()
     io.write("Enter choice: ")
-    io.flush()
-    local choice = io.read()
-    return choice
+    local choice = M_UI.read_line()
+    return choice or ""
 end
 
 function M_UI.prompt(text)
     io.write(text .. " ")
-    io.flush()
-    return io.read()
+    return M_UI.read_line() or ""
 end
 
 function M_UI.confirm(text)
@@ -1860,3 +1871,9 @@ end
 
 
 main()
+
+
+
+
+
+
