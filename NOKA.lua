@@ -279,6 +279,64 @@ function M_Shell.take_screenshot(path)
     M_Shell.exec("screencap -p " .. path)
 end
 
+-- Get screen size from wm size command
+function M_Shell.get_screen_size()
+    local stdout, _, code = M_Shell.exec("wm size")
+    if code == 0 then
+        local w, h = stdout:match("(%d+)x(%d+)")
+        if w and h then
+            return tonumber(w), tonumber(h)
+        end
+    end
+    return 1080, 1920
+end
+
+-- Calculate window bounds for grid: 1 2 / 3 4 / 5
+function M_Shell.get_window_bounds(index)
+    local screen_w, screen_h = M_Shell.get_screen_size()
+    local margin = 10
+    local taskbar_h = 100
+    local usable_h = screen_h - taskbar_h
+    
+    local col = ((index - 1) % 2) + 1
+    local row = math.floor((index - 1) / 2) + 1
+    
+    local cell_w = math.floor((screen_w - margin * 3) / 2)
+    local cell_h = math.floor((usable_h - margin * 4) / 3)
+    
+    local left, top, right, bottom
+    
+    if row <= 2 then
+        left = margin + (col - 1) * (cell_w + margin)
+        top = margin + (row - 1) * (cell_h + margin)
+        right = left + cell_w
+        bottom = top + cell_h
+    else
+        left = math.floor((screen_w - cell_w) / 2)
+        top = margin + 2 * (cell_h + margin)
+        right = left + cell_w
+        bottom = top + cell_h
+    end
+    
+    return string.format("%d,%d,%d,%d", left, top, right, bottom)
+end
+
+-- Launch app with optional freeform window bounds
+function M_Shell.launch_app(pkg, place_id, window_bounds)
+    local url = string.format("roblox://placeId=%s", place_id)
+    local cmd
+    
+    if window_bounds then
+        cmd = string.format("am start -a android.intent.action.VIEW -d '%s' -f 0x20000000 --windowingMode 5 --windowBounds %s %s",
+            url, window_bounds, pkg)
+    else
+        cmd = string.format("am start -a android.intent.action.VIEW -d '%s' %s", url, pkg)
+    end
+    
+    M_Shell.exec(cmd)
+    M_Log.write("info", "Launched " .. pkg .. " with placeId " .. place_id, pkg)
+end
+
 -- =============================================================================
 -- MODULE: M_Config
 -- =============================================================================
@@ -775,7 +833,8 @@ function M_Monitor.get_instance_status(pkg)
     }
 end
 
-function M_Monitor.launch_all()
+function M_Monitor.launch_all(start_index)
+    start_index = start_index or 1
     local packages = M_Config.get("packages") or {}
     local place_id = M_Config.get("place_id")
     
@@ -784,31 +843,41 @@ function M_Monitor.launch_all()
         return false
     end
     
-    for _, pkg in ipairs(packages) do
+    -- Filter to only enabled packages and track index for layout
+    local enabled_packages = {}
+    for i, pkg in ipairs(packages) do
         if pkg.enabled then
-            M_Monitor.instances[pkg.id] = {
-                start_time = os.time(),
-                restarts = 0,
-                paused = false
-            }
-            
-            M_UI.info("Launching " .. pkg.nickname .. "...")
-            M_Shell.kill_app(pkg.id)
-            os.execute("sleep 2")
-            M_Shell.launch_app(pkg.id, place_id)
-            
-            -- Wait interval before next launch
-            local interval = M_Config.get("launch_interval") or 120
-            if M_Config.get("launch_interval_random") then
-                local min = M_Config.get("launch_interval_min") or 90
-                local max = M_Config.get("launch_interval_max") or 150
-                interval = math.random(min, max)
-            end
-            
-            if _ < #packages then
-                M_UI.info("Waiting " .. interval .. "s before next launch...")
-                os.execute("sleep " .. interval)
-            end
+            table.insert(enabled_packages, pkg)
+        end
+    end
+    
+    for idx = start_index, #enabled_packages do
+        local pkg = enabled_packages[idx]
+        M_Monitor.instances[pkg.id] = {
+            start_time = os.time(),
+            restarts = 0,
+            paused = false
+        }
+        
+        -- Get window bounds for this position in grid (1-5)
+        local bounds = M_Shell.get_window_bounds(idx)
+        
+        M_UI.info("Launching " .. pkg.nickname .. " [Position " .. idx .. "]...")
+        M_Shell.kill_app(pkg.id)
+        os.execute("sleep 1")
+        M_Shell.launch_app(pkg.id, place_id, bounds)
+        
+        -- Wait interval before next launch
+        local interval = M_Config.get("launch_interval") or 120
+        if M_Config.get("launch_interval_random") then
+            local min = M_Config.get("launch_interval_min") or 90
+            local max = M_Config.get("launch_interval_max") or 150
+            interval = math.random(min, max)
+        end
+        
+        if idx < #enabled_packages then
+            M_UI.info("Waiting " .. interval .. "s before next launch...")
+            os.execute("sleep " .. interval)
         end
     end
     
@@ -946,41 +1015,70 @@ end
 local M_Dashboard = {}
 
 function M_Dashboard.render()
-    M_UI.header()
-    print(M_UI.color("bold", M_UI.color("cyan", "NOKA Live Monitor")))
-    print(M_UI.color("white", "Press Q to stop, R to restart all, P to pause, S for screenshot, L for logs"))
-    print()
+    M_UI.clear()
+    M_UI.banner()
+    
+    -- Status line with controls
+    print("╔══════════════════════════════════════════════════════════╗")
+    print("║  " .. M_UI.color("cyan", "NOKA Live Monitor") .. " — Press Q to stop, R to restart all" .. string.rep(" ", 19) .. "║")
+    print("╠══════╦══════════════════╦══════════╦═════════╦══════════╣")
+    print("║  " .. M_UI.color("bold", "#") .. "   ║ " .. M_UI.color("bold", "Package") .. string.rep(" ", 11) .. "║ " .. M_UI.color("bold", "Status") .. "  ║ " .. M_UI.color("bold", "Uptime") .. "  ║ " .. M_UI.color("bold", "Next Act") .. " ║")
+    print("╠══════╬══════════════════╬══════════╬═════════╬══════════╣")
     
     local packages = M_Config.get("packages") or {}
-    local rows = {}
+    local has_instances = false
     
     for i, pkg in ipairs(packages) do
         if pkg.enabled then
+            has_instances = true
             local status = M_Monitor.get_instance_status(pkg)
-            local color = "white"
-            if status.status == "alive" then color = "green"
-            elseif status.status == "slow" then color = "yellow"
-            elseif status.status == "crashed" or status.status == "missing" then color = "red"
-            elseif status.status == "restarting" then color = "cyan"
+            
+            -- Status emoji and text
+            local status_display = "?"
+            if status.status == "alive" then
+                status_display = M_UI.color("green", "✅ Live")
+            elseif status.status == "slow" then
+                status_display = M_UI.color("yellow", "⚠ Slow")
+            elseif status.status == "crashed" then
+                status_display = M_UI.color("red", "❌ Crash")
+            elseif status.status == "missing" then
+                status_display = M_UI.color("red", "❌ No Sig")
+            elseif status.status == "restarting" then
+                status_display = M_UI.color("cyan", "⟳ Restart")
             end
             
-            table.insert(rows, {
-                tostring(i),
-                pkg.nickname,
-                M_UI.color(color, status.status_symbol),
-                M_Monitor.format_uptime(status.uptime),
-                tostring(status.elapsed or "N/A")
-            })
+            -- Calculate next action time (placeholder - use restart interval minus elapsed)
+            local next_act = "--:--"
+            local restart_interval = (M_Config.get("restart_interval_minutes") or 60) * 60
+            if status.uptime > 0 then
+                local remaining = restart_interval - (status.uptime % restart_interval)
+                local m = math.floor(remaining / 60)
+                local s = remaining % 60
+                next_act = string.format("%02d:%02d", m, s)
+                if status.status == "crashed" or status.status == "missing" then
+                    next_act = M_UI.color("red", "NOW")
+                end
+            end
+            
+            -- Format row with padding
+            local num = string.format("║  %-2d  ║", i)
+            local name = string.format(" %-16s ║", pkg.nickname:sub(1, 16))
+            local stat = string.format(" %-8s ║", status_display)
+            local up = string.format(" %s ║", M_Monitor.format_uptime(status.uptime))
+            local nxt = string.format(" %-8s ║", next_act)
+            
+            print(num .. name .. stat .. up .. nxt)
         end
     end
     
-    if #rows > 0 then
-        M_UI.show_table({"#", "Package", "Status", "Uptime", "Last HB"}, rows)
-    else
-        print("No active instances.")
+    if not has_instances then
+        print("║      ║  No active instances        ║          ║         ║          ║")
     end
     
+    print("╚══════╩══════════════════╩══════════╩═════════╩══════════╝")
     print()
+    
+    -- Global stats
     local global_uptime = 0
     if M_Monitor.start_time then
         global_uptime = os.time() - M_Monitor.start_time
@@ -997,10 +1095,55 @@ end
 
 function M_Dashboard.start()
     M_Monitor.running = true
-    M_Monitor.launch_all()
     
-    -- Start heartbeat server
+    -- Start heartbeat server first
     M_Dashboard.run_heartbeat_server()
+    
+    -- Show empty menu first before launching any instances
+    M_Dashboard.render()
+    print()
+    print(M_UI.color("yellow", "═══ Press ENTER to start launching instances ═══"))
+    M_UI.read_line()
+    
+    -- Get enabled packages for sequential launching
+    local packages = M_Config.get("packages") or {}
+    local enabled_packages = {}
+    for i, pkg in ipairs(packages) do
+        if pkg.enabled then
+            table.insert(enabled_packages, pkg)
+        end
+    end
+    
+    -- Launch instances one by one with live updates
+    for idx, pkg in ipairs(enabled_packages) do
+        M_Monitor.instances[pkg.id] = {
+            start_time = os.time(),
+            restarts = 0,
+            paused = false
+        }
+        
+        -- Get window bounds for grid position
+        local bounds = M_Shell.get_window_bounds(idx)
+        local place_id = M_Config.get("place_id")
+        
+        -- Update display showing launch in progress
+        M_Dashboard.render()
+        print()
+        print(M_UI.color("cyan", "═══ Launching " .. pkg.nickname .. " [Position " .. idx .. "] ═══"))
+        print(M_UI.color("white", "Window: " .. bounds))
+        
+        M_Shell.kill_app(pkg.id)
+        os.execute("sleep 1")
+        M_Shell.launch_app(pkg.id, place_id, bounds)
+        
+        -- Short delay to let app open before next
+        if idx < #enabled_packages then
+            os.execute("sleep 3")
+        end
+    end
+    
+    M_Monitor.start_time = os.time()
+    M_Webhook.send("startup", "All Instances", "Started", "00:00:00")
     
     local last_check = 0
     local last_scheduler = 0
@@ -1008,13 +1151,17 @@ function M_Dashboard.start()
     while M_Monitor.running do
         M_Dashboard.render()
         
-        -- Non-blocking input check (using read with timeout)
-        local cmd = "read -t 5 -n 1 key; echo $key"
-        local f = io.popen(cmd)
+        -- Non-blocking input check
         local key = ""
-        if f then
-            key = (f:read("*l") or ""):gsub("%s", "")
-            f:close()
+        local tty = io.open("/dev/tty", "r")
+        if tty then
+            local cmd = "read -t 5 -n 1 key < /dev/tty; echo $key"
+            local f = io.popen(cmd)
+            if f then
+                key = (f:read("*l") or ""):gsub("%s", "")
+                f:close()
+            end
+            tty:close()
         end
         
         if key:lower() == "q" then
@@ -1038,7 +1185,7 @@ function M_Dashboard.start()
         elseif key:lower() == "p" then
             io.write("Instance number to pause/resume: ")
             io.flush()
-            local num = tonumber(io.read())
+            local num = tonumber(M_UI.read_line())
             if num then
                 local pkgs = M_Config.get("packages") or {}
                 if pkgs[num] then
