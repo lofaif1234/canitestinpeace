@@ -480,45 +480,65 @@ M_Auth.configured = false
 
 -- Generate HWID from device fingerprint
 function M_Auth.generate_hwid()
+    -- Ensure we have a valid table
     local hwid_parts = {}
     
-    -- Get Android device info
-    local android_id, _ = M_Shell.exec("settings get secure android_id 2>/dev/null | head -c 16")
-    if android_id and #android_id >= 8 then
-        table.insert(hwid_parts, android_id:gsub("%s+", ""))
+    -- Get Android device info (safe pcall wrapper)
+    local ok1, android_id = pcall(function()
+        local out, _ = M_Shell.exec("settings get secure android_id 2>/dev/null | head -c 16")
+        return out
+    end)
+    if ok1 and android_id and type(android_id) == "string" and #android_id >= 8 then
+        local cleaned = android_id:gsub("%s+", "")
+        table.insert(hwid_parts, cleaned)
     end
     
     -- Get build fingerprint
-    local fingerprint, _ = M_Shell.exec("getprop ro.build.fingerprint 2>/dev/null | md5sum | head -c 16")
-    if fingerprint and #fingerprint >= 8 then
-        table.insert(hwid_parts, fingerprint:gsub("%s+", ""))
+    local ok2, fingerprint = pcall(function()
+        local out, _ = M_Shell.exec("getprop ro.build.fingerprint 2>/dev/null | md5sum | head -c 16")
+        return out
+    end)
+    if ok2 and fingerprint and type(fingerprint) == "string" and #fingerprint >= 8 then
+        local cleaned = fingerprint:gsub("%s+", "")
+        table.insert(hwid_parts, cleaned)
     end
     
     -- Get hardware info
-    local hardware, _ = M_Shell.exec("getprop ro.hardware 2>/dev/null | md5sum | head -c 16")
-    if hardware and #hardware >= 8 then
-        table.insert(hwid_parts, hardware:gsub("%s+", ""))
+    local ok3, hardware = pcall(function()
+        local out, _ = M_Shell.exec("getprop ro.hardware 2>/dev/null | md5sum | head -c 16")
+        return out
+    end)
+    if ok3 and hardware and type(hardware) == "string" and #hardware >= 8 then
+        local cleaned = hardware:gsub("%s+", "")
+        table.insert(hwid_parts, cleaned)
     end
     
     -- Get serial (if available)
-    local serial, _ = M_Shell.exec("getprop ro.serialno 2>/dev/null | head -c 16")
-    if serial and #serial >= 4 then
-        table.insert(hwid_parts, serial:gsub("%s+", ""))
+    local ok4, serial = pcall(function()
+        local out, _ = M_Shell.exec("getprop ro.serialno 2>/dev/null | head -c 16")
+        return out
+    end)
+    if ok4 and serial and type(serial) == "string" and #serial >= 4 then
+        local cleaned = serial:gsub("%s+", "")
+        table.insert(hwid_parts, cleaned)
     end
     
     -- Combine all parts
     if #hwid_parts >= 2 then
         local combined = table.concat(hwid_parts, "-")
-        -- Create a hash-like format
         local hwid = combined:upper()
-        M_Log.write("info", "Generated HWID: " .. hwid:sub(1, 16) .. "...")
+        -- Safe logging
+        pcall(function() M_Log.write("info", "Generated HWID: " .. hwid:sub(1, 16) .. "...") end)
         return hwid
     end
     
     -- Fallback: generate from random + timestamp
     local timestamp = tostring(os.time())
-    local random_bytes, _ = M_Shell.exec("head -c 8 /dev/urandom | xxd -p 2>/dev/null")
-    if random_bytes then
+    local ok5, random_bytes = pcall(function()
+        local out, _ = M_Shell.exec("head -c 8 /dev/urandom | xxd -p 2>/dev/null")
+        return out
+    end)
+    if ok5 and random_bytes and type(random_bytes) == "string" then
         return (timestamp .. random_bytes):upper():gsub("%s+", "")
     end
     
@@ -718,24 +738,41 @@ end
 
 -- Initialize auth on startup
 function M_Auth.init()
-    local auth = M_Config.get("auth")
+    local auth = M_Config.get("auth") or {}
     
-    -- Ensure we have an HWID
-    if not auth.hwid or #auth.hwid < 10 then
-        auth.hwid = M_Auth.generate_hwid()
-        M_Config.set("auth", auth)
+    -- Ensure auth table has required fields
+    if type(auth) ~= "table" then
+        auth = {}
+    end
+    
+    -- Ensure we have an HWID (with error handling)
+    if not auth.hwid or type(auth.hwid) ~= "string" or #auth.hwid < 10 then
+        print("Generating device ID...")
+        local ok, hwid = pcall(M_Auth.generate_hwid)
+        if ok and hwid then
+            auth.hwid = hwid
+            M_Config.set("auth", auth)
+            print("Device ID generated successfully.")
+        else
+            -- Use fallback HWID if generation fails
+            auth.hwid = "NOKA-" .. tostring(os.time())
+            M_Config.set("auth", auth)
+            print("Using fallback device ID.")
+        end
     end
     
     -- Check if already validated
-    if auth.validated and auth.license_key and #auth.license_key >= 16 then
+    if auth.validated and auth.license_key and type(auth.license_key) == "string" and #auth.license_key >= 16 then
         print("Checking license...")
         local valid, msg = M_Auth.check_license()
         if valid then
             M_Auth.configured = true
-            M_Log.write("info", "License validated: " .. auth.license_key:sub(1, 8) .. "...")
+            pcall(function()
+                M_Log.write("info", "License validated: " .. auth.license_key:sub(1, 8) .. "...")
+            end)
             return true
         else
-            print(M_UI.color("red", "License check failed: " .. msg))
+            print(M_UI.color("red", "License check failed: " .. tostring(msg)))
             print("You may need to reactivate.")
             auth.validated = false
             M_Config.set("auth", auth)
@@ -2390,7 +2427,12 @@ local function main()
     M_Webhook.load_history()
     
     -- Authenticate (license check with HWID locking)
-    local auth_result = M_Auth.init()
+    local ok, auth_result = pcall(M_Auth.init)
+    if not ok then
+        M_UI.error("Auth system error: " .. tostring(auth_result))
+        M_UI.error("Try running with: lua NOKA.lua --debug")
+        os.exit(1)
+    end
     if not auth_result then
         M_UI.error("Authentication failed. Exiting.")
         os.exit(1)
