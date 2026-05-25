@@ -330,23 +330,26 @@ function M_Shell.launch_app(pkg, place_id, window_bounds)
     local cmd
     
     if window_bounds and window_bounds ~= "" then
-        cmd = string.format("am start -a android.intent.action.VIEW -d '%s' -f 0x20000000 --windowingMode 5 --windowBounds %s %s",
+        cmd = string.format("am start -a android.intent.action.VIEW -d '%s' -f 0x20000000 --windowingMode 5 --windowBounds %s -p %s",
             url, window_bounds, pkg)
         print("    [Debug] Using freeform mode with bounds: " .. window_bounds)
     else
-        cmd = string.format("am start -a android.intent.action.VIEW -d '%s' %s", url, pkg)
+        cmd = string.format("am start -a android.intent.action.VIEW -d '%s' -p %s", url, pkg)
         print("    [Debug] Using standard launch")
     end
     
-    print("    [Debug] Command: " .. cmd:sub(1, 80) .. "...")
+    print("    [Debug] Full command: " .. cmd)
     
-    local _, code = M_Shell.exec(cmd)
+    local stdout, stderr, code = M_Shell.exec(cmd)
     if code == 0 then
         M_Log.write("info", "Launched " .. pkg .. " with placeId " .. place_id, pkg)
         return true
     else
         M_Log.write("error", "Failed to launch " .. pkg .. " (exit code " .. code .. ")", pkg)
-        print("    [Debug] Launch failed with exit code: " .. code)
+        print("    [Debug] Launch failed with exit code: " .. tostring(code))
+        if stderr and #stderr > 0 then
+            print("    [Debug] Error: " .. stderr:sub(1, 100))
+        end
         return false
     end
 end
