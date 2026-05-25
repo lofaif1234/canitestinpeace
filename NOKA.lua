@@ -317,12 +317,12 @@ end
 -- Launch app with optional freeform window bounds
 function M_Shell.launch_app(pkg, place_id, window_bounds)
     if not pkg or pkg == "" then
-        M_UI.error("No package specified for launch")
+        print("[ERROR] No package specified for launch")
         return false
     end
     
     if not place_id or place_id == "" then
-        M_UI.error("No place_id specified for launch")
+        print("[ERROR] No place_id specified for launch")
         return false
     end
     
@@ -794,8 +794,8 @@ function M_Auth.periodic_check()
     
     local valid, msg = M_Auth.check_license()
     if not valid then
-        M_UI.error("License validation failed: " .. msg)
-        M_UI.error("NOKA will now exit.")
+        print("[ERROR] License validation failed: " .. msg)
+        print("[ERROR] NOKA will now exit.")
         os.execute("sleep 3")
         os.exit(1)
     end
@@ -979,6 +979,10 @@ end
 
 function M_UI.pause()
     M_UI.prompt("\nPress Enter to continue...")
+end
+
+function M_UI.info(msg)
+    print(M_UI.color("cyan", "[INFO] " .. msg))
 end
 
 -- =============================================================================
@@ -1192,7 +1196,7 @@ function M_Monitor.launch_all(start_index)
     local place_id = M_Config.get("place_id")
     
     if not place_id or place_id == "" then
-        M_UI.error("No Place ID configured. Run configuration wizard first.")
+        print("[ERROR] No Place ID configured. Run configuration wizard first.")
         return false
     end
     
@@ -1215,7 +1219,7 @@ function M_Monitor.launch_all(start_index)
         -- Get window bounds for this position in grid (1-5)
         local bounds = M_Shell.get_window_bounds(idx)
         
-        M_UI.info("Launching " .. pkg.nickname .. " [Position " .. idx .. "]...")
+        print("[INFO] Launching " .. pkg.nickname .. " [Position " .. idx .. "]...")
         M_Shell.kill_app(pkg.id)
         os.execute("sleep 1")
         M_Shell.launch_app(pkg.id, place_id, bounds)
@@ -1229,7 +1233,7 @@ function M_Monitor.launch_all(start_index)
         end
         
         if idx < #enabled_packages then
-            M_UI.info("Waiting " .. interval .. "s before next launch...")
+            print("[INFO] Waiting " .. interval .. "s before next launch...")
             os.execute("sleep " .. interval)
         end
     end
@@ -1245,7 +1249,7 @@ function M_Monitor.stop_all()
         M_Shell.kill_app(pkg.id)
     end
     M_Monitor.running = false
-    M_UI.success("All instances stopped")
+    print("[OK] All instances stopped")
 end
 
 function M_Monitor.restart_instance(pkg)
@@ -1264,7 +1268,7 @@ function M_Monitor.restart_instance(pkg)
 end
 
 function M_Monitor.handle_crashed(pkg)
-    M_UI.error("Crash detected: " .. pkg.nickname)
+    print("[ERROR] Crash detected: " .. pkg.nickname)
     M_Log.write("error", "Crash detected, restarting " .. pkg.id, pkg.nickname)
     
     local policy = M_Config.get("restart_policy")
@@ -1272,8 +1276,6 @@ function M_Monitor.handle_crashed(pkg)
         M_Monitor.restart_instance(pkg)
     end
 end
-
-M_UI.info = function(msg) print(M_UI.color("cyan", "[INFO] " .. msg)) end
 
 -- =============================================================================
 -- MODULE: M_Scheduler
