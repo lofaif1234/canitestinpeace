@@ -696,6 +696,11 @@ function M_Auth.prompt_license()
     io.flush()
     local key = io.read()
     
+    -- Handle nil input (EOF/error)
+    if not key then
+        key = ""
+    end
+    
     key = key:gsub("%s+", "")
     
     -- Allow 'admin' as hardcoded bypass
