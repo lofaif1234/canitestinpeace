@@ -478,56 +478,57 @@ end
 local M_Auth = {}
 M_Auth.configured = false
 
--- Generate HWID from device fingerprint
+-- Generate HWID from device fingerprint (uses string building, not tables)
 function M_Auth.generate_hwid()
-    -- Ensure we have a valid table
-    local hwid_parts = {}
+    local hwid_string = ""
+    local part_count = 0
+    
+    -- Helper to safely add a part
+    local function add_part(value)
+        if value and type(value) == "string" and #value >= 4 then
+            value = value:gsub("%s+", ""):gsub("[^%w]", "")
+            if #value >= 4 then
+                if hwid_string == "" then
+                    hwid_string = value
+                else
+                    hwid_string = hwid_string .. "-" .. value
+                end
+                part_count = part_count + 1
+            end
+        end
+    end
     
     -- Get Android device info (safe pcall wrapper)
     local ok1, android_id = pcall(function()
-        local out, _ = M_Shell.exec("settings get secure android_id 2>/dev/null | head -c 16")
+        local out = M_Shell.exec("settings get secure android_id 2>/dev/null | head -c 16")
         return out
     end)
-    if ok1 and android_id and type(android_id) == "string" and #android_id >= 8 then
-        local cleaned = android_id:gsub("%s+", "")
-        table.insert(hwid_parts, cleaned)
-    end
+    if ok1 then add_part(android_id) end
     
     -- Get build fingerprint
     local ok2, fingerprint = pcall(function()
-        local out, _ = M_Shell.exec("getprop ro.build.fingerprint 2>/dev/null | md5sum | head -c 16")
+        local out = M_Shell.exec("getprop ro.build.fingerprint 2>/dev/null | md5sum | head -c 16")
         return out
     end)
-    if ok2 and fingerprint and type(fingerprint) == "string" and #fingerprint >= 8 then
-        local cleaned = fingerprint:gsub("%s+", "")
-        table.insert(hwid_parts, cleaned)
-    end
+    if ok2 then add_part(fingerprint) end
     
     -- Get hardware info
     local ok3, hardware = pcall(function()
-        local out, _ = M_Shell.exec("getprop ro.hardware 2>/dev/null | md5sum | head -c 16")
+        local out = M_Shell.exec("getprop ro.hardware 2>/dev/null | md5sum | head -c 16")
         return out
     end)
-    if ok3 and hardware and type(hardware) == "string" and #hardware >= 8 then
-        local cleaned = hardware:gsub("%s+", "")
-        table.insert(hwid_parts, cleaned)
-    end
+    if ok3 then add_part(hardware) end
     
     -- Get serial (if available)
     local ok4, serial = pcall(function()
-        local out, _ = M_Shell.exec("getprop ro.serialno 2>/dev/null | head -c 16")
+        local out = M_Shell.exec("getprop ro.serialno 2>/dev/null | head -c 16")
         return out
     end)
-    if ok4 and serial and type(serial) == "string" and #serial >= 4 then
-        local cleaned = serial:gsub("%s+", "")
-        table.insert(hwid_parts, cleaned)
-    end
+    if ok4 then add_part(serial) end
     
-    -- Combine all parts
-    if #hwid_parts >= 2 then
-        local combined = table.concat(hwid_parts, "-")
-        local hwid = combined:upper()
-        -- Safe logging
+    -- If we have at least 2 parts, use them
+    if part_count >= 2 then
+        local hwid = hwid_string:upper()
         pcall(function() M_Log.write("info", "Generated HWID: " .. hwid:sub(1, 16) .. "...") end)
         return hwid
     end
@@ -535,11 +536,11 @@ function M_Auth.generate_hwid()
     -- Fallback: generate from random + timestamp
     local timestamp = tostring(os.time())
     local ok5, random_bytes = pcall(function()
-        local out, _ = M_Shell.exec("head -c 8 /dev/urandom | xxd -p 2>/dev/null")
+        local out = M_Shell.exec("head -c 8 /dev/urandom | xxd -p 2>/dev/null")
         return out
     end)
     if ok5 and random_bytes and type(random_bytes) == "string" then
-        return (timestamp .. random_bytes):upper():gsub("%s+", "")
+        return (timestamp .. "-" .. random_bytes):upper():gsub("%s+", "")
     end
     
     return ("NOKA-" .. timestamp):upper()
