@@ -691,14 +691,18 @@ function M_Auth.prompt_license()
     print("Your Device ID: " .. M_Auth.get_hwid():sub(1, 32) .. "...")
     print()
     
-    -- Get license key from user
+    -- Get license key from user (read from TTY to work with pipes)
     io.write("Enter your license key (or 'admin'): ")
     io.flush()
-    local key = io.read()
     
-    -- Handle nil input (EOF/error)
-    if not key then
-        key = ""
+    local key = ""
+    local tty = io.open("/dev/tty", "r")
+    if tty then
+        key = tty:read("*l") or ""
+        tty:close()
+    else
+        -- Fallback to stdin
+        key = io.read() or ""
     end
     
     key = key:gsub("%s+", "")
@@ -737,7 +741,16 @@ function M_Auth.prompt_license()
         print("2) Exit")
         io.write("\nChoice: ")
         io.flush()
-        local choice = io.read()
+        
+        local choice = ""
+        local tty2 = io.open("/dev/tty", "r")
+        if tty2 then
+            choice = tty2:read("*l") or ""
+            tty2:close()
+        else
+            choice = io.read() or ""
+        end
+        
         if choice == "2" then
             os.exit(1)
         end
