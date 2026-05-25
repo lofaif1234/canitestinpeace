@@ -268,13 +268,6 @@ function M_Shell.kill_app(pkg)
     M_Log.write("info", "Killed " .. pkg)
 end
 
-function M_Shell.launch_app(pkg, place_id)
-    local url = string.format("roblox://placeId=%s", place_id)
-    local cmd = string.format("am start -a android.intent.action.VIEW -d '%s' %s", url, pkg)
-    M_Shell.exec(cmd)
-    M_Log.write("info", "Launched " .. pkg .. " with placeId " .. place_id, pkg)
-end
-
 function M_Shell.take_screenshot(path)
     M_Shell.exec("screencap -p " .. path)
 end
@@ -323,18 +316,39 @@ end
 
 -- Launch app with optional freeform window bounds
 function M_Shell.launch_app(pkg, place_id, window_bounds)
+    if not pkg or pkg == "" then
+        M_UI.error("No package specified for launch")
+        return false
+    end
+    
+    if not place_id or place_id == "" then
+        M_UI.error("No place_id specified for launch")
+        return false
+    end
+    
     local url = string.format("roblox://placeId=%s", place_id)
     local cmd
     
-    if window_bounds then
+    if window_bounds and window_bounds ~= "" then
         cmd = string.format("am start -a android.intent.action.VIEW -d '%s' -f 0x20000000 --windowingMode 5 --windowBounds %s %s",
             url, window_bounds, pkg)
+        print("    [Debug] Using freeform mode with bounds: " .. window_bounds)
     else
         cmd = string.format("am start -a android.intent.action.VIEW -d '%s' %s", url, pkg)
+        print("    [Debug] Using standard launch")
     end
     
-    M_Shell.exec(cmd)
-    M_Log.write("info", "Launched " .. pkg .. " with placeId " .. place_id, pkg)
+    print("    [Debug] Command: " .. cmd:sub(1, 80) .. "...")
+    
+    local _, code = M_Shell.exec(cmd)
+    if code == 0 then
+        M_Log.write("info", "Launched " .. pkg .. " with placeId " .. place_id, pkg)
+        return true
+    else
+        M_Log.write("error", "Failed to launch " .. pkg .. " (exit code " .. code .. ")", pkg)
+        print("    [Debug] Launch failed with exit code: " .. code)
+        return false
+    end
 end
 
 -- =============================================================================
@@ -375,7 +389,15 @@ M_Config.defaults = {
     },
     scheduler = {},
     created_at = "",
-    updated_at = ""
+    updated_at = "",
+    auth = {
+        license_key = "",
+        hwid = "",
+        api_url = "http://localhost:5000",
+        api_secret = "",
+        validated = false,
+        last_validation = ""
+    }
 }
 
 function M_Config.load()
@@ -448,6 +470,295 @@ function M_Config.validate_url(url)
     if url:match("^https?://www%.roblox%.com/games/%d+") then return true end
     if url:match("roblox://placeId=%d+") then return true end
     return false
+end
+
+-- =============================================================================
+-- MODULE: M_Auth (License Authentication with HWID Locking)
+-- =============================================================================
+local M_Auth = {}
+M_Auth.configured = false
+
+-- Generate HWID from device fingerprint
+function M_Auth.generate_hwid()
+    local hwid_parts = {}
+    
+    -- Get Android device info
+    local android_id, _ = M_Shell.exec("settings get secure android_id 2>/dev/null | head -c 16")
+    if android_id and #android_id >= 8 then
+        table.insert(hwid_parts, android_id:gsub("%s+", ""))
+    end
+    
+    -- Get build fingerprint
+    local fingerprint, _ = M_Shell.exec("getprop ro.build.fingerprint 2>/dev/null | md5sum | head -c 16")
+    if fingerprint and #fingerprint >= 8 then
+        table.insert(hwid_parts, fingerprint:gsub("%s+", ""))
+    end
+    
+    -- Get hardware info
+    local hardware, _ = M_Shell.exec("getprop ro.hardware 2>/dev/null | md5sum | head -c 16")
+    if hardware and #hardware >= 8 then
+        table.insert(hwid_parts, hardware:gsub("%s+", ""))
+    end
+    
+    -- Get serial (if available)
+    local serial, _ = M_Shell.exec("getprop ro.serialno 2>/dev/null | head -c 16")
+    if serial and #serial >= 4 then
+        table.insert(hwid_parts, serial:gsub("%s+", ""))
+    end
+    
+    -- Combine all parts
+    if #hwid_parts >= 2 then
+        local combined = table.concat(hwid_parts, "-")
+        -- Create a hash-like format
+        local hwid = combined:upper()
+        M_Log.write("info", "Generated HWID: " .. hwid:sub(1, 16) .. "...")
+        return hwid
+    end
+    
+    -- Fallback: generate from random + timestamp
+    local timestamp = tostring(os.time())
+    local random_bytes, _ = M_Shell.exec("head -c 8 /dev/urandom | xxd -p 2>/dev/null")
+    if random_bytes then
+        return (timestamp .. random_bytes):upper():gsub("%s+", "")
+    end
+    
+    return ("NOKA-" .. timestamp):upper()
+end
+
+-- Make HTTP request to auth API
+function M_Auth.api_request(endpoint, data)
+    local auth = M_Config.get("auth")
+    local api_url = auth.api_url or "http://localhost:5000"
+    local api_secret = auth.api_secret or ""
+    
+    local url = api_url .. endpoint
+    local json_data = json.encode(data)
+    
+    -- Use curl for HTTP request
+    local cmd = string.format(
+        "curl -s -X POST -H 'Content-Type: application/json' -H 'X-API-Secret: %s' -d '%s' '%s' 2>/dev/null",
+        api_secret:gsub("'", "'\"'\"'"),
+        json_data:gsub("'", "'\"'\"'"),
+        url
+    )
+    
+    local response, code = M_Shell.exec(cmd, 10)
+    
+    if code ~= 0 or not response or #response == 0 then
+        return nil, "Request failed (code: " .. tostring(code) .. ")"
+    end
+    
+    -- Parse JSON response
+    local result, err = json.decode(response)
+    if not result then
+        return nil, "Invalid response: " .. tostring(err)
+    end
+    
+    return result, nil
+end
+
+-- Validate license with server
+function M_Auth.validate_license(key, hwid)
+    key = (key or ""):upper():gsub("%s+", "")
+    hwid = hwid or M_Auth.get_hwid()
+    
+    -- Hardcoded admin bypass
+    if key == "ADMIN" then
+        M_Config.set("auth", {
+            license_key = key,
+            hwid = hwid,
+            api_url = M_Config.get("auth").api_url,
+            api_secret = M_Config.get("auth").api_secret,
+            validated = true,
+            last_validation = os.date("%Y-%m-%d %H:%M:%S")
+        })
+        M_Config.save()
+        return true, "Administrator"
+    end
+    
+    if #key < 16 then
+        return false, "Invalid key format"
+    end
+    
+    local result, err = M_Auth.api_request("/api/validate", {
+        key = key,
+        hwid = hwid
+    })
+    
+    if err then
+        return false, "Connection error: " .. err
+    end
+    
+    if not result.success then
+        return false, result.error or "Validation failed"
+    end
+    
+    -- Save validated key
+    M_Config.set("auth", {
+        license_key = key,
+        hwid = hwid,
+        api_url = M_Config.get("auth").api_url,
+        api_secret = M_Config.get("auth").api_secret,
+        validated = true,
+        last_validation = os.date("%Y-%m-%d %H:%M:%S")
+    })
+    M_Config.save()
+    
+    return true, result.discord_username or "License valid"
+end
+
+-- Quick check (periodic validation)
+function M_Auth.check_license()
+    local auth = M_Config.get("auth")
+    if not auth or not auth.validated then
+        return false, "Not authenticated"
+    end
+    
+    -- Hardcoded admin bypass - skip server check
+    if auth.license_key == "ADMIN" then
+        return true, "Administrator mode"
+    end
+    
+    local result, err = M_Auth.api_request("/api/check", {
+        key = auth.license_key,
+        hwid = auth.hwid
+    })
+    
+    if err or not result or not result.success then
+        -- Mark as invalid
+        local new_auth = auth
+        new_auth.validated = false
+        M_Config.set("auth", new_auth)
+        M_Config.save()
+        return false, "License invalid or expired"
+    end
+    
+    return true, "License valid"
+end
+
+-- Get or generate HWID
+function M_Auth.get_hwid()
+    local auth = M_Config.get("auth")
+    if auth and auth.hwid and #auth.hwid > 10 then
+        return auth.hwid
+    end
+    
+    local hwid = M_Auth.generate_hwid()
+    if auth then
+        auth.hwid = hwid
+        M_Config.set("auth", auth)
+    end
+    return hwid
+end
+
+-- Prompt for license key (first-time setup)
+function M_Auth.prompt_license()
+    M_UI.clear()
+    M_UI.header()
+    print(M_UI.color("bold", M_UI.color("cyan", "=== NOKA License Activation ===")))
+    print()
+    print("This copy of NOKA is licensed per-user with HWID locking.")
+    print()
+    print("To get your license key:")
+    print("1. Join our Discord server")
+    print("2. Verify your purchase")
+    print("3. Use /key command in Discord")
+    print()
+    print(M_UI.color("yellow", "Your Device ID: ") .. M_Auth.get_hwid():sub(1, 32) .. "...")
+    print()
+    
+    -- Get license key from user
+    io.write("Enter your license key (or 'admin'): ")
+    io.flush()
+    local key = io.read()
+    
+    key = key:gsub("%s+", "")
+    
+    -- Allow 'admin' as hardcoded bypass
+    if key:upper() == "ADMIN" then
+        print(M_UI.color("cyan", "\nActivating admin mode..."))
+        local valid, msg = M_Auth.validate_license("ADMIN")
+        if valid then
+            print(M_UI.color("green", "\n✓ Admin mode activated!"))
+            M_Auth.configured = true
+            os.execute("sleep 1")
+            return true
+        end
+    end
+    
+    if not key or #key < 16 then
+        print(M_UI.color("red", "\nInvalid key! Please try again."))
+        os.execute("sleep 2")
+        return M_Auth.prompt_license()
+    end
+    
+    print("\nValidating license...")
+    local valid, msg = M_Auth.validate_license(key)
+    
+    if valid then
+        print(M_UI.color("green", "\n✓ License activated successfully!"))
+        print("Welcome, " .. msg)
+        M_Auth.configured = true
+        os.execute("sleep 2")
+        return true
+    else
+        print(M_UI.color("red", "\n✗ Activation failed: " .. msg))
+        print("\nOptions:")
+        print("1) Try again")
+        print("2) Exit")
+        io.write("\nChoice: ")
+        io.flush()
+        local choice = io.read()
+        if choice == "2" then
+            os.exit(1)
+        end
+        return M_Auth.prompt_license()
+    end
+end
+
+-- Initialize auth on startup
+function M_Auth.init()
+    local auth = M_Config.get("auth")
+    
+    -- Ensure we have an HWID
+    if not auth.hwid or #auth.hwid < 10 then
+        auth.hwid = M_Auth.generate_hwid()
+        M_Config.set("auth", auth)
+    end
+    
+    -- Check if already validated
+    if auth.validated and auth.license_key and #auth.license_key >= 16 then
+        print("Checking license...")
+        local valid, msg = M_Auth.check_license()
+        if valid then
+            M_Auth.configured = true
+            M_Log.write("info", "License validated: " .. auth.license_key:sub(1, 8) .. "...")
+            return true
+        else
+            print(M_UI.color("red", "License check failed: " .. msg))
+            print("You may need to reactivate.")
+            auth.validated = false
+            M_Config.set("auth", auth)
+            M_Config.save()
+        end
+    end
+    
+    -- Need to activate
+    return M_Auth.prompt_license()
+end
+
+-- Periodic license check (call this periodically)
+function M_Auth.periodic_check()
+    if not M_Auth.configured then return false end
+    
+    local valid, msg = M_Auth.check_license()
+    if not valid then
+        M_UI.error("License validation failed: " .. msg)
+        M_UI.error("NOKA will now exit.")
+        os.execute("sleep 3")
+        os.exit(1)
+    end
+    return true
 end
 
 -- =============================================================================
@@ -550,6 +861,7 @@ function M_UI.main_menu()
     print("7) Scheduler")
     print("8) Export / Import config")
     print("9) About & help")
+    print("L) License info & reactivation")
     print("0) Exit")
     print()
     io.write("Enter choice: ")
@@ -1099,12 +1411,6 @@ function M_Dashboard.start()
     -- Start heartbeat server first
     M_Dashboard.run_heartbeat_server()
     
-    -- Show empty menu first before launching any instances
-    M_Dashboard.render()
-    print()
-    print(M_UI.color("yellow", "═══ Press ENTER to start launching instances ═══"))
-    M_UI.read_line()
-    
     -- Get enabled packages for sequential launching
     local packages = M_Config.get("packages") or {}
     local enabled_packages = {}
@@ -1114,7 +1420,26 @@ function M_Dashboard.start()
         end
     end
     
-    -- Launch instances one by one with live updates
+    if #enabled_packages == 0 then
+        M_UI.error("No instances configured. Run Setup Wizard first.")
+        M_UI.pause()
+        return
+    end
+    
+    local place_id = M_Config.get("place_id")
+    if not place_id or place_id == "" then
+        M_UI.error("No Place ID configured. Run Setup Wizard first.")
+        M_UI.pause()
+        return
+    end
+    
+    -- Show launch starting
+    M_UI.clear()
+    M_UI.banner()
+    print(M_UI.color("cyan", "Starting " .. #enabled_packages .. " instance(s)..."))
+    print()
+    
+    -- Launch instances one by one
     for idx, pkg in ipairs(enabled_packages) do
         M_Monitor.instances[pkg.id] = {
             start_time = os.time(),
@@ -1122,33 +1447,51 @@ function M_Dashboard.start()
             paused = false
         }
         
-        -- Get window bounds for grid position
         local bounds = M_Shell.get_window_bounds(idx)
-        local place_id = M_Config.get("place_id")
         
-        -- Update display showing launch in progress
-        M_Dashboard.render()
-        print()
-        print(M_UI.color("cyan", "═══ Launching " .. pkg.nickname .. " [Position " .. idx .. "] ═══"))
-        print(M_UI.color("white", "Window: " .. bounds))
+        io.write("  [" .. idx .. "/" .. #enabled_packages .. "] " .. pkg.nickname .. "... ")
+        io.flush()
         
         M_Shell.kill_app(pkg.id)
         os.execute("sleep 1")
-        M_Shell.launch_app(pkg.id, place_id, bounds)
         
-        -- Short delay to let app open before next
+        local success = M_Shell.launch_app(pkg.id, place_id, bounds)
+        if success then
+            print(M_UI.color("green", "✓ OK"))
+        else
+            print(M_UI.color("red", "✗ FAILED"))
+        end
+        
         if idx < #enabled_packages then
-            os.execute("sleep 3")
+            os.execute("sleep 2")
         end
     end
+    
+    print()
+    print(M_UI.color("green", "Launch complete!"))
+    os.execute("sleep 1")
     
     M_Monitor.start_time = os.time()
     M_Webhook.send("startup", "All Instances", "Started", "00:00:00")
     
     local last_check = 0
     local last_scheduler = 0
+    local last_auth_check = os.time()
     
     while M_Monitor.running do
+        -- Periodic license validation (every 5 minutes)
+        if os.time() - last_auth_check >= 300 then
+            last_auth_check = os.time()
+            local valid, err = M_Auth.check_license()
+            if not valid then
+                M_UI.error("License validation failed: " .. tostring(err))
+                M_UI.error("NOKA will now exit. Please reactivate.")
+                M_Monitor.running = false
+                M_Monitor.stop_all()
+                os.execute("sleep 3")
+                os.exit(1)
+            end
+        end
         M_Dashboard.render()
         
         -- Non-blocking input check
@@ -1925,6 +2268,62 @@ function MenuHandlers.export_import_menu()
     end
 end
 
+-- License menu
+function MenuHandlers.license_menu()
+    while true do
+        M_UI.header()
+        print(M_UI.color("cyan", "=== LICENSE INFORMATION ==="))
+        print()
+        
+        local auth = M_Config.get("auth")
+        if auth and auth.validated then
+            if auth.license_key == "ADMIN" then
+                print(M_UI.color("green", "✓ ADMIN MODE ACTIVE"))
+                print(M_UI.color("yellow", "No license check required"))
+                print()
+            else
+                print(M_UI.color("green", "✓ License Active"))
+                print("Key: " .. (auth.license_key:sub(1, 12) or "unknown") .. "...")
+                print("Device ID: " .. (auth.hwid and auth.hwid:sub(1, 20) or "unknown") .. "...")
+                print("Last validated: " .. (auth.last_validation or "never"))
+                print()
+                print(M_UI.color("yellow", "To use on another device:"))
+                print("1. Use /resethwid in Discord")
+                print("2. Run NOKA on new device")
+                print("3. Enter same license key")
+            end
+        else
+            print(M_UI.color("red", "✗ License Not Active"))
+            print()
+            print("You need to activate NOKA with a valid license key.")
+        end
+        
+        print()
+        print("1) Reactivate / Change key")
+        print("2) Validate now")
+        print("3) Back to main menu")
+        print()
+        
+        io.write("Choice: ")
+        local choice = M_UI.read_line()
+        
+        if choice == "1" then
+            M_Auth.prompt_license()
+        elseif choice == "2" then
+            print("Validating...")
+            local valid, msg = M_Auth.check_license()
+            if valid then
+                print(M_UI.color("green", "✓ License valid!"))
+            else
+                print(M_UI.color("red", "✗ Validation failed: " .. msg))
+            end
+            os.execute("sleep 2")
+        elseif choice == "3" then
+            break
+        end
+    end
+end
+
 -- Option 9: About & Help
 function MenuHandlers.about_help()
     M_UI.header()
@@ -1990,6 +2389,13 @@ local function main()
     M_Config.load()
     M_Webhook.load_history()
     
+    -- Authenticate (license check with HWID locking)
+    local auth_result = M_Auth.init()
+    if not auth_result then
+        M_UI.error("Authentication failed. Exiting.")
+        os.exit(1)
+    end
+    
     -- Check for debug flag
     local debug_mode = false
     for _, arg in ipairs(arg or {}) do
@@ -2028,6 +2434,8 @@ local function main()
             MenuHandlers.export_import_menu()
         elseif choice == "9" then
             MenuHandlers.about_help()
+        elseif choice:lower() == "l" then
+            MenuHandlers.license_menu()
         elseif choice == "0" then
             running = false
             print()
