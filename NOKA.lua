@@ -673,10 +673,13 @@ function M_Auth.get_hwid()
 end
 
 -- Prompt for license key (first-time setup)
+-- NOTE: Uses plain print, not M_UI (M_UI defined later in file)
 function M_Auth.prompt_license()
-    M_UI.clear()
-    M_UI.header()
-    print(M_UI.color("bold", M_UI.color("cyan", "=== NOKA License Activation ===")))
+    -- Clear screen manually
+    io.write("\27[2J\27[H")
+    io.flush()
+    
+    print("=== NOKA License Activation ===")
     print()
     print("This copy of NOKA is licensed per-user with HWID locking.")
     print()
@@ -685,7 +688,7 @@ function M_Auth.prompt_license()
     print("2. Verify your purchase")
     print("3. Use /key command in Discord")
     print()
-    print(M_UI.color("yellow", "Your Device ID: ") .. M_Auth.get_hwid():sub(1, 32) .. "...")
+    print("Your Device ID: " .. M_Auth.get_hwid():sub(1, 32) .. "...")
     print()
     
     -- Get license key from user
@@ -697,10 +700,10 @@ function M_Auth.prompt_license()
     
     -- Allow 'admin' as hardcoded bypass
     if key:upper() == "ADMIN" then
-        print(M_UI.color("cyan", "\nActivating admin mode..."))
+        print("\nActivating admin mode...")
         local valid, msg = M_Auth.validate_license("ADMIN")
         if valid then
-            print(M_UI.color("green", "\n✓ Admin mode activated!"))
+            print("\n[OK] Admin mode activated!")
             M_Auth.configured = true
             os.execute("sleep 1")
             return true
@@ -708,7 +711,7 @@ function M_Auth.prompt_license()
     end
     
     if not key or #key < 16 then
-        print(M_UI.color("red", "\nInvalid key! Please try again."))
+        print("\n[ERROR] Invalid key! Please try again.")
         os.execute("sleep 2")
         return M_Auth.prompt_license()
     end
@@ -717,13 +720,13 @@ function M_Auth.prompt_license()
     local valid, msg = M_Auth.validate_license(key)
     
     if valid then
-        print(M_UI.color("green", "\n✓ License activated successfully!"))
+        print("\n[OK] License activated successfully!")
         print("Welcome, " .. msg)
         M_Auth.configured = true
         os.execute("sleep 2")
         return true
     else
-        print(M_UI.color("red", "\n✗ Activation failed: " .. msg))
+        print("\n[ERROR] Activation failed: " .. msg)
         print("\nOptions:")
         print("1) Try again")
         print("2) Exit")
@@ -773,7 +776,7 @@ function M_Auth.init()
             end)
             return true
         else
-            print(M_UI.color("red", "License check failed: " .. tostring(msg)))
+            print("[ERROR] License check failed: " .. tostring(msg))
             print("You may need to reactivate.")
             auth.validated = false
             M_Config.set("auth", auth)
@@ -2430,8 +2433,8 @@ local function main()
     -- Authenticate (license check with HWID locking)
     local ok, auth_result = pcall(M_Auth.init)
     if not ok then
-        M_UI.error("Auth system error: " .. tostring(auth_result))
-        M_UI.error("Try running with: lua NOKA.lua --debug")
+        print("[ERROR] Auth system error: " .. tostring(auth_result))
+        print("[ERROR] Check that config is valid JSON")
         os.exit(1)
     end
     if not auth_result then
