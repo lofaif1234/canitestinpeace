@@ -1398,8 +1398,9 @@ class MenuHandlers:
                 print("")
                 print(f"Found {len(found_packages)} package(s):")
                 for i, pkg in enumerate(found_packages, 1):
-                    print(f"  {i}. {pkg}")
-                print("")
+                    print(f"  {i}. {pkg}", flush=True)
+                    time.sleep(0.01)
+                print("", flush=True)
                 
                 if not packages:
                     print("No Roblox packages found. Please install Roblox from Play Store.")
