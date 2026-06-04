@@ -1394,11 +1394,13 @@ class MenuHandlers:
                         "enabled": True
                     })
                 
-                # Print summary
+                # Print summary - only show first 3 to avoid terminal wrapping
                 print("")
                 print(f"Found {len(found_packages)} package(s):")
-                for i, pkg in enumerate(found_packages, 1):
+                for i, pkg in enumerate(found_packages[:3], 1):
                     print(f"  {i}. {pkg}")
+                if len(found_packages) > 3:
+                    print(f"  ... and {len(found_packages) - 3} more")
                 print("")
                 
                 if not packages:
@@ -1421,16 +1423,10 @@ class MenuHandlers:
                     "enabled": True
                 })
         
-        # Get nicknames
-        print("\n" + "=" * 40)
-        print("PACKAGE NICKNAMES")
-        print("=" * 40)
+        # Auto-assign nicknames (Roblox 1, Roblox 2, ...) to avoid laddering
         for i, pkg in enumerate(packages):
-            print(f"\n{i+1}. {pkg['id']}")
-            nickname = M_UI.prompt(f"Nickname [{pkg['nickname']}]: ")
-            if nickname:
-                packages[i]["nickname"] = nickname
-        print("\n" + "=" * 40)
+            packages[i]["nickname"] = f"Roblox {i+1}"
+        print(f"Auto-assigned nicknames: Roblox 1 to Roblox {len(packages)}")
         
         # Step 2: Place ID
         M_UI.wizard_step(2, total_steps, "Game Configuration")
