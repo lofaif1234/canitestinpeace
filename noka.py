@@ -93,17 +93,12 @@ class M_UI:
     @staticmethod
     def read_line() -> str:
         """Read input from user with proper handling"""
+        sys.stdout.flush()
+        sys.stderr.flush()
         try:
-            # Try to open /dev/tty for direct terminal input
-            with open('/dev/tty', 'r') as tty:
-                line = tty.readline().strip()
-                return line
+            return input().strip()
         except:
-            # Fallback to stdin
-            try:
-                return input().strip()
-            except:
-                return ""
+            return ""
     
     @staticmethod
     def prompt(text: str) -> str:
@@ -1426,15 +1421,16 @@ class MenuHandlers:
                     "enabled": True
                 })
         
-        # Get nicknames - clear screen first to reset terminal
-        M_UI.clear()
-        print("Package Nicknames")
-        print("-" * 40)
+        # Get nicknames
+        print("\n" + "=" * 40)
+        print("PACKAGE NICKNAMES")
+        print("=" * 40)
         for i, pkg in enumerate(packages):
-            print(f"\nPackage {i+1}: {pkg['id']}")
+            print(f"\n{i+1}. {pkg['id']}")
             nickname = M_UI.prompt(f"Nickname [{pkg['nickname']}]: ")
             if nickname:
                 packages[i]["nickname"] = nickname
+        print("\n" + "=" * 40)
         
         # Step 2: Place ID
         M_UI.wizard_step(2, total_steps, "Game Configuration")
