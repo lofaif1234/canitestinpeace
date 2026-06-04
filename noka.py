@@ -230,6 +230,60 @@ class M_Shell:
             return False
     
     @staticmethod
+    def resize_window_after_launch(package: str, bounds: str):
+        """Resize window after launch using wm commands (requires root)"""
+        if not bounds:
+            return
+        
+        M_UI.info(f"Resizing window to {bounds}...")
+        
+        # Wait a moment for window to be created
+        time.sleep(2)
+        
+        # Parse bounds
+        try:
+            left, top, right, bottom = map(int, bounds.split(','))
+            width = right - left
+            height = bottom - top
+        except:
+            M_UI.error("Invalid bounds format")
+            return
+        
+        has_root = M_Shell.has_root()
+        if not has_root:
+            M_UI.warning("Cannot resize - root required for wm commands")
+            return
+        
+        # Method 1: Try to find window and resize using wm
+        # Get window ID for the package
+        cmd = f"su -c 'dumpsys window | grep -A 5 {package} | grep mWinId'"
+        stdout, stderr, code = M_Shell.exec(cmd)
+        
+        # Method 2: Use am resize-task
+        # Try to resize most recent task
+        cmd = f"su -c 'am resize-task -1 {width} {height}'"
+        stdout, stderr, code = M_Shell.exec(cmd)
+        if code == 0:
+            M_UI.info("✓ Resized using am resize-task")
+            return
+        
+        # Method 3: Use wm size/position commands
+        # This sets the override bounds for the window
+        cmd = f"su -c 'wm overscan {bounds}'"
+        stdout, stderr, code = M_Shell.exec(cmd)
+        
+        # Method 4: Try to move window directly
+        cmd = f"su -c 'input tap {left + 50} {top + 50}'"  # Tap window to focus
+        M_Shell.exec(cmd)
+        time.sleep(0.5)
+        
+        # Try using settings put for window size
+        cmd = f"su -c 'settings put global window_animation_scale 0'"
+        M_Shell.exec(cmd)
+        
+        M_UI.info("Resize attempted (results may vary by Android version)")
+    
+    @staticmethod
     def get_window_bounds(index: int, total: int = 1) -> str:
         """Calculate window bounds for grid layout - 2x2 grid with 5th in center"""
         screen_w, screen_h = M_Shell.detect_screen_size()
@@ -318,18 +372,33 @@ class M_Shell:
         pkg_path = stdout.split("package:")[1].strip() if "package:" in stdout else stdout.strip()
         M_UI.info(f"✓ Package found: {pkg_path}")
         
+        # Store package and bounds for post-launch resize
+        launch_info = {
+            "package": package,
+            "bounds": window_bounds,
+            "has_root": has_root
+        }
+        
         url = f"roblox://placeId={place_id}"
         
         # Build commands - different format for root vs non-root
         methods = []
         
-        # Method 1: Freeform with bounds (if bounds provided)
+        # Method 1: Freeform with bounds using windowingMode 4 (FREEFORM)
         if window_bounds:
             if has_root:
-                cmd = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x20000000 --windowingMode 5 --windowBounds {window_bounds} {package}'"
+                # Try with FREEFORM mode (4) instead of MULTI_WINDOW (5)
+                cmd = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x20000000 --windowingMode 4 --windowBounds {window_bounds} {package}'"
             else:
-                cmd = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x20000000 --windowingMode 5 --windowBounds {window_bounds} {package}"
-            methods.append({"name": "Freeform with bounds", "cmd": cmd})
+                cmd = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x20000000 --windowingMode 4 --windowBounds {window_bounds} {package}"
+            methods.append({"name": "Freeform bounds (mode 4)", "cmd": cmd})
+            
+            # Also try with different flag combinations
+            if has_root:
+                cmd2 = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10000000 --windowingMode 4 --windowBounds {window_bounds} {package}'"
+            else:
+                cmd2 = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10000000 --windowingMode 4 --windowBounds {window_bounds} {package}"
+            methods.append({"name": "Freeform alt flags", "cmd": cmd2})
         
         # Method 2: Standard URL launch
         if has_root:
@@ -354,6 +423,9 @@ class M_Shell:
             
             if code == 0:
                 M_UI.success(f"✓ Success with method: {method['name']}")
+                # Post-launch resize if needed
+                if window_bounds and launch_info["has_root"]:
+                    M_Shell.resize_window_after_launch(package, window_bounds)
                 return True
             else:
                 M_UI.info(f"✗ Method {i} failed (code: {code})")
