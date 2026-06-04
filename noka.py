@@ -1379,16 +1379,23 @@ class MenuHandlers:
                 # Fall through to manual entry
                 choice = "2"
             elif code == 0 and stdout:
+                found_packages = []
                 for line in stdout.strip().split('\n'):
                     if 'package:' in line:
                         pkg = line.replace('package:', '').strip()
-                        nickname = pkg.replace('com.roblox.client', 'Roblox').replace('.', ' ').title()
-                        packages.append({
-                            "id": pkg,
-                            "nickname": nickname,
-                            "enabled": True
-                        })
-                        print(f"  Found: {pkg}")
+                        found_packages.append(pkg)
+                
+                # Print all found packages in a clean list
+                print(f"\nFound {len(found_packages)} package(s):")
+                for pkg in found_packages:
+                    nickname = pkg.replace('com.roblox.client', 'Roblox').replace('.', ' ').title()
+                    packages.append({
+                        "id": pkg,
+                        "nickname": nickname,
+                        "enabled": True
+                    })
+                    print(f"  • {pkg}")
+                print()
                 
                 if not packages:
                     print("No Roblox packages found. Please install Roblox from Play Store.")
