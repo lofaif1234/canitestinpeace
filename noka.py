@@ -1102,9 +1102,10 @@ class MenuHandlers:
         packages = []
         
         if choice == "1":
-            # Auto-detect Roblox packages
+            # Auto-detect Roblox packages (com.roblox.* pattern)
             print("\nScanning for Roblox packages...")
-            stdout, stderr, code = M_Shell.exec("pm list packages | grep roblox")
+            print("Looking for pattern: com.roblox.*")
+            stdout, stderr, code = M_Shell.exec("pm list packages | grep 'com\\.roblox\\.'")
             
             if code == 0 and stdout:
                 for line in stdout.strip().split('\n'):
