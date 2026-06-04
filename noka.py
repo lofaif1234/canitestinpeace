@@ -207,30 +207,66 @@ class M_Shell:
         return code == 0
     
     @staticmethod
-    def get_window_bounds(index: int) -> str:
-        """Calculate window bounds for grid layout"""
-        # Screen dimensions (adjust for your device)
-        screen_w, screen_h = 1080, 1920
-        margin = 50
-        cell_w, cell_h = 500, 800
+    def detect_screen_size():
+        """Auto-detect screen size using wm size"""
+        try:
+            stdout, _, code = M_Shell.exec("su -c 'wm size'" if M_Shell.has_root() else "wm size")
+            if code == 0 and stdout:
+                # Parse output like "Physical size: 1080x1920"
+                match = __import__('re').search(r'(\d+)x(\d+)', stdout)
+                if match:
+                    return int(match.group(1)), int(match.group(2))
+        except:
+            pass
+        return 1080, 1920  # Default fallback
+    
+    @staticmethod
+    def has_root() -> bool:
+        """Check if root is available"""
+        try:
+            stdout, _, code = M_Shell.exec("test -f /system/bin/su && echo yes || echo no")
+            return code == 0 and "yes" in stdout
+        except:
+            return False
+    
+    @staticmethod
+    def get_window_bounds(index: int, total: int = 1) -> str:
+        """Calculate window bounds for grid layout - auto arranges based on count"""
+        screen_w, screen_h = M_Shell.detect_screen_size()
+        margin = 20
         
-        positions = [
-            (margin, margin),  # Top-left
-            (screen_w - cell_w - margin, margin),  # Top-right
-            (margin, screen_h - cell_h - margin),  # Bottom-left
-            (screen_w - cell_w - margin, screen_h - cell_h - margin),  # Bottom-right
-            ((screen_w - cell_w) // 2, (screen_h - cell_h) // 2),  # Center
-        ]
+        # Calculate grid layout based on total instances
+        if total == 1:
+            # Single instance - centered
+            cell_w = screen_w - 100
+            cell_h = screen_h - 200
+            left = (screen_w - cell_w) // 2
+            top = 100
+        elif total == 2:
+            # Side by side
+            cell_w = (screen_w - margin * 3) // 2
+            cell_h = screen_h - 200
+            col = (index - 1) % 2
+            left = margin + col * (cell_w + margin)
+            top = 100
+        elif total <= 4:
+            # 2x2 grid
+            cell_w = (screen_w - margin * 3) // 2
+            cell_h = (screen_h - margin * 3) // 2
+            col = (index - 1) % 2
+            row = (index - 1) // 2
+            left = margin + col * (cell_w + margin)
+            top = margin + row * (cell_h + margin)
+        else:
+            # 3x2 or more grid
+            cols = 3
+            cell_w = (screen_w - margin * (cols + 1)) // cols
+            cell_h = (screen_h - margin * 3) // 2
+            col = (index - 1) % cols
+            row = (index - 1) // cols
+            left = margin + col * (cell_w + margin)
+            top = margin + row * (cell_h + margin)
         
-        if index <= len(positions):
-            left, top = positions[index - 1]
-            right = left + cell_w
-            bottom = top + cell_h
-            return f"{left},{top},{right},{bottom}"
-        
-        # Default center position
-        left = (screen_w - cell_w) // 2
-        top = margin + 2 * (cell_h + margin)
         right = left + cell_w
         bottom = top + cell_h
         return f"{left},{top},{right},{bottom}"
@@ -813,7 +849,7 @@ class M_Monitor:
     
     @staticmethod
     def launch_all(start_index: int = 1) -> bool:
-        """Launch all enabled instances"""
+        """Launch all enabled instances with dashboard countdown"""
         config = M_Config.get()
         packages = config.get("packages", [])
         place_id = config.get("place_id")
@@ -830,12 +866,42 @@ class M_Monitor:
             M_UI.error("No enabled packages to launch")
             return False
         
+        interval = config.get("launch_interval", 120)
+        
+        # PRE-LAUNCH COUNTDOWN DASHBOARD
         M_UI.clear()
-        print(M_UI.color('cyan', "=== LAUNCHING INSTANCES ==="))
-        print(f"Total packages: {total_packages}")
+        print(M_UI.color('cyan', "╔══════════════════════════════════════════════════════════╗"))
+        print(M_UI.color('cyan', "║           NOKA LAUNCH SEQUENCE - PREPARING               ║"))
+        print(M_UI.color('cyan', "╚══════════════════════════════════════════════════════════╝"))
+        print()
+        print(f"Total instances to launch: {total_packages}")
         print(f"Place ID: {place_id}")
+        print(f"Cooldown between launches: {interval}s")
+        print()
+        print("Layout preview:")
+        
+        # Show layout preview
+        for i in range(1, total_packages + 1):
+            pkg = enabled_packages[i - 1]
+            bounds = M_Shell.get_window_bounds(i, total_packages)
+            print(f"  [{i}] {pkg.get('nickname', pkg['id']):15s} -> Position {bounds}")
+        
+        print()
+        print(M_UI.color('yellow', f"Starting in {interval} seconds..."))
+        print(M_UI.color('cyan', "Press Ctrl+C to cancel"))
         print()
         
+        # Countdown with dashboard
+        for i in range(interval, 0, -1):
+            mins, secs = divmod(i, 60)
+            timer = f"{mins:02d}:{secs:02d}"
+            print(f"\r⏱️  Launching in: {M_UI.color('cyan', timer)}  ", end='', flush=True)
+            time.sleep(1)
+        print("\r🚀 Launch sequence starting!                ")
+        print()
+        time.sleep(1)
+        
+        # LAUNCH SEQUENCE WITH LIVE DASHBOARD
         for idx, pkg in enumerate(enabled_packages[start_index - 1:], start_index):
             M_Monitor.instances[pkg["id"]] = {
                 "start_time": time.time(),
@@ -843,7 +909,35 @@ class M_Monitor:
                 "paused": False
             }
             
-            bounds = M_Shell.get_window_bounds(idx)
+            # Auto-calculate bounds based on position and total
+            bounds = M_Shell.get_window_bounds(idx, total_packages)
+            
+            # Clear and show launch dashboard
+            M_UI.clear()
+            print(M_UI.color('cyan', "╔══════════════════════════════════════════════════════════╗"))
+            print(M_UI.color('cyan', f"║           LAUNCHING INSTANCE {idx}/{total_packages}                      ║"))
+            print(M_UI.color('cyan', "╚══════════════════════════════════════════════════════════╝"))
+            print()
+            
+            # Show all instances status
+            print("Instance Status:")
+            print("-" * 50)
+            for i, p in enumerate(enabled_packages, 1):
+                status = "🔄 LAUNCHING" if i == idx else ("✅ DONE" if i < idx else "⏳ WAITING")
+                if i == idx:
+                    print(f"  {M_UI.color('cyan', f'[{i}]')} {p.get('nickname', p['id']):20s} {M_UI.color('cyan', status)}")
+                elif i < idx:
+                    print(f"  [{i}] {p.get('nickname', p['id']):20s} {M_UI.color('green', status)}")
+                else:
+                    print(f"  [{i}] {p.get('nickname', p['id']):20s} {M_UI.color('yellow', status)}")
+            print("-" * 50)
+            print()
+            
+            # Launch current instance
+            print(f"📦 Package: {pkg['id']}")
+            print(f"📍 Position: {bounds}")
+            print(f"🎯 Place ID: {place_id}")
+            print()
             
             print(f"[{idx}/{total_packages}] Launching {pkg.get('nickname', pkg['id'])}...")
             M_Shell.kill_app(pkg["id"])
@@ -851,31 +945,35 @@ class M_Monitor:
             
             success = M_Shell.launch_app(pkg["id"], place_id, bounds)
             
-            if not success:
-                M_UI.error(f"Failed to launch {pkg.get('nickname', pkg['id'])}")
-                continue
-            
-            M_UI.success(f"Launched {pkg.get('nickname', pkg['id'])}")
+            if success:
+                M_UI.success(f"✓ Launched {pkg.get('nickname', pkg['id'])}")
+            else:
+                M_UI.error(f"✗ Failed to launch {pkg.get('nickname', pkg['id'])}")
             
             # Wait between launches (except for the last one)
-            current_pos = idx - start_index + 1  # 1-indexed position in loop
+            current_pos = idx - start_index + 1
             remaining = total_packages - current_pos
-            if remaining > 0:
-                interval = config.get("launch_interval", 120)
-                if config.get("launch_interval_random"):
-                    min_val = config.get("launch_interval_min", 90)
-                    max_val = config.get("launch_interval_max", 150)
-                    interval = random.randint(min_val, max_val)
-                
-                print(f"\nWaiting {interval}s before next launch ({remaining} remaining)...")
-                for i in range(interval, 0, -1):
-                    print(f"\rCountdown: {i}s...   ", end='', flush=True)
-                    time.sleep(1)
-                print("\rLaunching next instance...       ")
+            if remaining > 0 and interval > 0:
                 print()
+                print(M_UI.color('yellow', f"Waiting {interval}s before next launch..."))
+                print(f"({remaining} instance{'s' if remaining > 1 else ''} remaining)")
+                print()
+                
+                for i in range(interval, 0, -1):
+                    mins, secs = divmod(i, 60)
+                    timer = f"{mins:02d}:{secs:02d}"
+                    print(f"\r⏱️  Next launch in: {M_UI.color('cyan', timer)}  ", end='', flush=True)
+                    time.sleep(1)
+                print("\r" + " " * 40 + "\r", end='')
         
+        # Final summary
+        M_UI.clear()
+        print(M_UI.color('green', "╔══════════════════════════════════════════════════════════╗"))
+        print(M_UI.color('green', "║           ALL INSTANCES LAUNCHED SUCCESSFULLY!           ║"))
+        print(M_UI.color('green', "╚══════════════════════════════════════════════════════════╝"))
         print()
-        M_UI.success("All instances launched!")
+        print(f"Total launched: {total_packages}")
+        print(f"Starting monitoring...")
         time.sleep(2)
         
         M_Monitor.start_time = time.time()
@@ -931,8 +1029,11 @@ class M_Monitor:
     @staticmethod
     def check_instance_status(pkg: Dict) -> Dict:
         """Check if instance is still running"""
-        # Simple check - try to get process info
-        stdout, stderr, code = M_Shell.exec(f"pidof {pkg['id']}")
+        # Use root if available for better process detection
+        if M_Shell.has_root():
+            stdout, stderr, code = M_Shell.exec(f"su -c 'pidof {pkg['id']}'")
+        else:
+            stdout, stderr, code = M_Shell.exec(f"pidof {pkg['id']}")
         
         if code == 0 and stdout.strip():
             # Process exists
