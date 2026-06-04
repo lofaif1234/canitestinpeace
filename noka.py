@@ -1394,13 +1394,11 @@ class MenuHandlers:
                         "enabled": True
                     })
                 
-                # Print summary - only show first 3 to avoid terminal wrapping
+                # Print summary
                 print("")
                 print(f"Found {len(found_packages)} package(s):")
-                for i, pkg in enumerate(found_packages[:3], 1):
+                for i, pkg in enumerate(found_packages, 1):
                     print(f"  {i}. {pkg}")
-                if len(found_packages) > 3:
-                    print(f"  ... and {len(found_packages) - 3} more")
                 print("")
                 
                 if not packages:
@@ -1742,8 +1740,29 @@ def signal_handler(signum, frame):
 # =============================================================================
 # MAIN FUNCTION
 # =============================================================================
+def reset_terminal():
+    """Force terminal into sane mode (fixes ladder/staircase output under su/root)"""
+    try:
+        # Enable ONLCR so \n is translated to \r\n
+        import termios
+        fd = sys.stdin.fileno()
+        attrs = termios.tcgetattr(fd)
+        # attrs[1] is oflag; enable OPOST and ONLCR
+        attrs[1] |= (termios.OPOST | termios.ONLCR)
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except Exception:
+        # Fallback: run stty sane via shell
+        try:
+            os.system("stty sane 2>/dev/null")
+        except Exception:
+            pass
+
+
 def main():
     """Main entry point"""
+    # Fix terminal output mode (must run before any output)
+    reset_terminal()
+    
     # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
