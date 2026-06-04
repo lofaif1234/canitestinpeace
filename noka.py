@@ -1089,9 +1089,136 @@ class MenuHandlers:
     
     @staticmethod
     def config_wizard():
-        """Configuration wizard"""
-        M_UI.clear()
-        M_UI.success("Configuration wizard would open here")
+        """Configuration wizard - First time setup"""
+        total_steps = 5
+        
+        # Step 1: Package Detection
+        M_UI.wizard_step(1, total_steps, "Package Detection")
+        print("1) Automatic (detect Roblox packages)")
+        print("2) Manual (enter package name)")
+        print()
+        
+        choice = M_UI.prompt("Choice:")
+        packages = []
+        
+        if choice == "1":
+            # Auto-detect Roblox packages
+            print("\nScanning for Roblox packages...")
+            stdout, stderr, code = M_Shell.exec("pm list packages | grep roblox")
+            
+            if code == 0 and stdout:
+                for line in stdout.strip().split('\n'):
+                    if 'package:' in line:
+                        pkg = line.replace('package:', '').strip()
+                        nickname = pkg.replace('com.roblox.client', 'Roblox').replace('.', ' ').title()
+                        packages.append({
+                            "id": pkg,
+                            "nickname": nickname,
+                            "enabled": True
+                        })
+                        print(f"  Found: {pkg}")
+            
+            if not packages:
+                print("No Roblox packages found. Please install Roblox from Play Store.")
+                M_UI.pause()
+                return
+            
+        else:
+            # Manual entry
+            print("\nEnter package name (e.g., com.roblox.client):")
+            pkg = M_UI.prompt("Package:")
+            if pkg:
+                packages.append({
+                    "id": pkg,
+                    "nickname": "Roblox 1",
+                    "enabled": True
+                })
+        
+        # Get nicknames
+        for i, pkg in enumerate(packages):
+            print(f"\nNickname for {pkg['id']}:")
+            nickname = M_UI.prompt(f"Name [default: {pkg['nickname']}]:")
+            if nickname:
+                packages[i]["nickname"] = nickname
+        
+        # Step 2: Place ID
+        M_UI.wizard_step(2, total_steps, "Game Configuration")
+        print("Enter your Roblox game URL or Place ID:")
+        print("Examples:")
+        print("  - https://www.roblox.com/games/1234567890/Game-Name")
+        print("  - 1234567890 (just the numbers)")
+        print()
+        
+        url = M_UI.prompt("URL or Place ID:")
+        
+        # Extract place ID from URL
+        place_id = ""
+        if url.isdigit():
+            place_id = url
+        elif "roblox.com/games/" in url:
+            place_id = url.split("/games/")[1].split("/")[0]
+        
+        if place_id:
+            print(f"\n✓ Place ID: {place_id}")
+            M_Config.set("place_id", place_id)
+            M_Config.set("game_url", url)
+        else:
+            print("\n✗ Invalid URL format")
+            M_UI.pause()
+            return
+        
+        # Step 3: Launch Interval
+        M_UI.wizard_step(3, total_steps, "Launch Settings")
+        print("Time between launching each instance (seconds):")
+        print("Default: 120 seconds (2 minutes)")
+        print()
+        
+        interval = M_UI.prompt("Interval [120]:")
+        if interval.isdigit():
+            M_Config.set("launch_interval", int(interval))
+        else:
+            M_Config.set("launch_interval", 120)
+        
+        # Step 4: Webhook (Optional)
+        M_UI.wizard_step(4, total_steps, "Webhook Setup (Optional)")
+        print("Discord webhook for notifications:")
+        print("Leave empty to skip")
+        print()
+        
+        webhook_url = M_UI.prompt("Webhook URL:")
+        if webhook_url and "discord.com/api/webhooks" in webhook_url:
+            M_Config.set("webhook", {
+                "enabled": True,
+                "url": webhook_url,
+                "events": ["startup", "crash", "restart", "shutdown"]
+            })
+            print("\n✓ Webhook configured")
+        else:
+            M_Config.set("webhook", {
+                "enabled": False,
+                "url": "",
+                "events": ["startup", "crash", "restart", "shutdown"]
+            })
+            print("\n✓ Webhook skipped")
+        
+        # Step 5: Save Configuration
+        M_UI.wizard_step(5, total_steps, "Save Configuration")
+        
+        # Save packages
+        M_Config.set("packages", packages)
+        M_Config.set("restart_policy", "crash_only")
+        
+        # Save to file
+        M_Config.save()
+        
+        print("\n✓ Configuration saved!")
+        print(f"\nSummary:")
+        print(f"  - Packages: {len(packages)}")
+        print(f"  - Place ID: {place_id}")
+        print(f"  - Launch Interval: {M_Config.get('launch_interval')}s")
+        print(f"  - Webhook: {'Enabled' if M_Config.get('webhook', {}).get('enabled') else 'Disabled'}")
+        print()
+        print("You're ready to start monitoring!")
         M_UI.pause()
     
     @staticmethod
@@ -1103,15 +1230,99 @@ class MenuHandlers:
     @staticmethod
     def webhook_menu():
         """Webhook configuration menu"""
-        M_UI.clear()
-        M_UI.success("Webhook menu would open here")
-        M_UI.pause()
+        while True:
+            M_UI.clear()
+            M_UI.header()
+            print(M_UI.color('cyan', "=== WEBHOOK & NOTIFICATIONS ==="))
+            print()
+            
+            webhook = M_Config.get("webhook") or {"enabled": False, "url": ""}
+            print(f"Current webhook: {M_Webhook.mask_url(webhook.get('url', ''))}")
+            print(f"Status: {'Enabled' if webhook.get('enabled') else 'Disabled'}")
+            print()
+            print("1) Change webhook URL")
+            print("2) Toggle enabled/disabled")
+            print("3) Test webhook")
+            print("4) View webhook history")
+            print("5) Clear webhook")
+            print("6) Back")
+            print()
+            
+            choice = M_UI.prompt("Choice:")
+            
+            if choice == "1":
+                url = M_UI.prompt("Webhook URL (discord.com/api/webhooks/...):")
+                if url and "discord.com/api/webhooks" in url:
+                    webhook["url"] = url
+                    webhook["enabled"] = True
+                    M_Config.set("webhook", webhook)
+                    M_UI.success("Webhook URL updated")
+                else:
+                    M_UI.error("Invalid Discord webhook URL")
+                M_UI.pause()
+            elif choice == "2":
+                webhook["enabled"] = not webhook.get("enabled", False)
+                M_Config.set("webhook", webhook)
+                M_UI.success(f"Webhook {'enabled' if webhook['enabled'] else 'disabled'}")
+                M_UI.pause()
+            elif choice == "3":
+                print("Sending test webhook...")
+                ok = M_Webhook.send("test", "Test Instance", "Testing", "00:00:00")
+                if ok:
+                    M_UI.success("Test sent successfully")
+                else:
+                    M_UI.error("Test failed - check webhook URL")
+                M_UI.pause()
+            elif choice == "4":
+                print("\nWebhook History (last 10):")
+                for entry in M_Webhook.history[-10:]:
+                    ts = entry.get("timestamp", "unknown")
+                    status = entry.get("status", "unknown")
+                    event = entry.get("event", "unknown")
+                    print(f"  [{ts}] {event}: {status}")
+                M_UI.pause()
+            elif choice == "5":
+                if M_UI.confirm("Clear webhook URL?"):
+                    webhook["url"] = ""
+                    webhook["enabled"] = False
+                    M_Config.set("webhook", webhook)
+                    M_UI.success("Webhook cleared")
+                M_UI.pause()
+            elif choice == "6":
+                break
     
     @staticmethod
     def update_url():
         """Update game URL"""
         M_UI.clear()
-        M_UI.success("URL update would open here")
+        M_UI.header()
+        print(M_UI.color('cyan', "=== UPDATE GAME URL ==="))
+        print()
+        print(f"Current URL: {M_Config.get('game_url') or 'None'}")
+        print(f"Current Place ID: {M_Config.get('place_id') or 'None'}")
+        print()
+        
+        url = M_UI.prompt("New Roblox URL or Place ID:")
+        
+        # Extract place ID
+        place_id = ""
+        if url.isdigit():
+            place_id = url
+        elif "roblox.com/games/" in url:
+            try:
+                place_id = url.split("/games/")[1].split("/")[0]
+            except:
+                pass
+        
+        if place_id:
+            M_Config.set("place_id", place_id)
+            M_Config.set("game_url", url if not url.isdigit() else f"https://www.roblox.com/games/{place_id}")
+            M_Config.save()
+            print(f"\n✓ Updated to Place ID: {place_id}")
+            M_UI.success("URL updated successfully")
+        else:
+            M_UI.error("Invalid URL format")
+        
         M_UI.pause()
     
     @staticmethod
