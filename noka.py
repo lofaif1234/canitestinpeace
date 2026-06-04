@@ -1102,12 +1102,49 @@ class MenuHandlers:
         packages = []
         
         if choice == "1":
-            # Auto-detect Roblox packages (com.roblox.* pattern)
+            # Auto-detect Roblox packages
             print("\nScanning for Roblox packages...")
-            print("Looking for pattern: com.roblox.*")
-            stdout, stderr, code = M_Shell.exec("pm list packages | grep 'com\\.roblox\\.'")
             
-            if code == 0 and stdout:
+            # Check for root access (common locations)
+            su_paths = ["/system/bin/su", "/system/xbin/su", "/sbin/su", "/su/bin/su"]
+            has_root = False
+            su_path = "su"
+            
+            for path in su_paths:
+                stdout, _, code = M_Shell.exec(f"test -f {path} && echo exists")
+                if code == 0 and "exists" in stdout:
+                    has_root = True
+                    su_path = path
+                    break
+            
+            if not has_root:
+                # Try which as fallback
+                root_stdout, _, root_code = M_Shell.exec("which su 2>/dev/null")
+                if root_code == 0 and root_stdout.strip():
+                    has_root = True
+                    su_path = "su"
+            
+            if has_root:
+                print("[INFO] Root detected, using elevated permissions...")
+                # Get all packages then filter in Python (avoid pipe issues)
+                stdout, stderr, code = M_Shell.exec(f"{su_path} -c 'pm list packages'")
+                if code == 0 and stdout:
+                    # Filter for roblox packages in Python
+                    lines = [line for line in stdout.split('\n') if 'roblox' in line.lower()]
+                    stdout = '\n'.join(lines)
+            else:
+                stdout, stderr, code = M_Shell.exec("pm list packages | grep roblox")
+            
+            # Check for permission errors
+            if code != 0 and stderr and "failed transaction" in stderr:
+                print("[ERROR] Cannot access package manager (permission denied)")
+                print("[INFO] This is a Termux limitation on your device.")
+                print("[INFO] Please use manual entry instead.")
+                print()
+                M_UI.pause()
+                # Fall through to manual entry
+                choice = "2"
+            elif code == 0 and stdout:
                 for line in stdout.strip().split('\n'):
                     if 'package:' in line:
                         pkg = line.replace('package:', '').strip()
@@ -1118,13 +1155,17 @@ class MenuHandlers:
                             "enabled": True
                         })
                         print(f"  Found: {pkg}")
-            
-            if not packages:
-                print("No Roblox packages found. Please install Roblox from Play Store.")
+                
+                if not packages:
+                    print("No Roblox packages found. Please install Roblox from Play Store.")
+                    M_UI.pause()
+                    return
+            else:
+                print("No Roblox packages found.")
                 M_UI.pause()
                 return
             
-        else:
+        if choice == "2":
             # Manual entry
             print("\nEnter package name (e.g., com.roblox.client):")
             pkg = M_UI.prompt("Package:")
