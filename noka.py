@@ -242,9 +242,17 @@ class M_Shell:
             M_UI.error("Package and place_id required")
             return False
         
-        # Check if package is installed
+        # Check if package is installed (with root if available)
         M_UI.info("Checking if package is installed...")
-        stdout, stderr, code = M_Shell.exec(f"pm path {package}")
+        
+        # Try to use root for pm path if available
+        root_check, _, root_ok = M_Shell.exec("test -f /system/bin/su && echo yes || echo no")
+        has_root = root_ok == 0 and "yes" in root_check
+        
+        if has_root:
+            stdout, stderr, code = M_Shell.exec(f"su -c 'pm path {package}'")
+        else:
+            stdout, stderr, code = M_Shell.exec(f"pm path {package}")
         
         if code != 0 or not stdout or "package:" not in stdout:
             M_UI.error(f"Package not installed: {package}")
@@ -256,38 +264,34 @@ class M_Shell:
         
         url = f"roblox://placeId={place_id}"
         
-        # Try multiple launch methods
+        # Try multiple launch methods (with root if available)
         methods = []
+        su_prefix = f"su -c '" if has_root else ""
+        su_suffix = "'" if has_root else ""
         
         # Method 1: Freeform with bounds
         if window_bounds:
             methods.append({
                 "name": "Freeform with bounds",
-                "cmd": f"am start -a android.intent.action.VIEW -d '{url}' -f 0x20000000 --windowingMode 5 --windowBounds {window_bounds} {package}"
+                "cmd": f"{su_prefix}am start -a android.intent.action.VIEW -d '{url}' -f 0x20000000 --windowingMode 5 --windowBounds {window_bounds} {package}{su_suffix}"
             })
         
         # Method 2: Standard URL launch
         methods.append({
             "name": "Standard URL launch",
-            "cmd": f"am start -a android.intent.action.VIEW -d '{url}' {package}"
+            "cmd": f"{su_prefix}am start -a android.intent.action.VIEW -d '{url}' {package}{su_suffix}"
         })
         
         # Method 3: Explicit activity
         methods.append({
             "name": "Package explicit launch",
-            "cmd": f"am start -a android.intent.action.VIEW -d '{url}' -n {package}/.Activity"
+            "cmd": f"{su_prefix}am start -a android.intent.action.VIEW -d '{url}' -n {package}/com.roblox.client.Activity{su_suffix}"
         })
         
-        # Method 4: Force stop then launch
-        methods.append({
-            "name": "Force stop then launch",
-            "cmd": f"am force-stop {package} && am start -a android.intent.action.VIEW -d '{url}' {package}"
-        })
-        
-        # Method 5: Simple launch
+        # Method 4: Simple launch
         methods.append({
             "name": "Simple launch",
-            "cmd": f"am start -n {package}/.Activity"
+            "cmd": f"{su_prefix}am start -n {package}/com.roblox.client.Activity{su_suffix}"
         })
         
         # Try each method
@@ -820,6 +824,17 @@ class M_Monitor:
         
         # Filter enabled packages
         enabled_packages = [p for p in packages if p.get("enabled")]
+        total_packages = len(enabled_packages)
+        
+        if total_packages == 0:
+            M_UI.error("No enabled packages to launch")
+            return False
+        
+        M_UI.clear()
+        print(M_UI.color('cyan', "=== LAUNCHING INSTANCES ==="))
+        print(f"Total packages: {total_packages}")
+        print(f"Place ID: {place_id}")
+        print()
         
         for idx, pkg in enumerate(enabled_packages[start_index - 1:], start_index):
             M_Monitor.instances[pkg["id"]] = {
@@ -830,7 +845,7 @@ class M_Monitor:
             
             bounds = M_Shell.get_window_bounds(idx)
             
-            print(f"[INFO] Launching {pkg.get('nickname', pkg['id'])} [Position {idx}]...")
+            print(f"[{idx}/{total_packages}] Launching {pkg.get('nickname', pkg['id'])}...")
             M_Shell.kill_app(pkg["id"])
             time.sleep(1)
             
@@ -840,16 +855,28 @@ class M_Monitor:
                 M_UI.error(f"Failed to launch {pkg.get('nickname', pkg['id'])}")
                 continue
             
-            # Wait between launches
-            if idx < len(enabled_packages):
+            M_UI.success(f"Launched {pkg.get('nickname', pkg['id'])}")
+            
+            # Wait between launches (except for the last one)
+            current_pos = idx - start_index + 1  # 1-indexed position in loop
+            remaining = total_packages - current_pos
+            if remaining > 0:
                 interval = config.get("launch_interval", 120)
                 if config.get("launch_interval_random"):
                     min_val = config.get("launch_interval_min", 90)
                     max_val = config.get("launch_interval_max", 150)
                     interval = random.randint(min_val, max_val)
                 
-                print(f"[INFO] Waiting {interval}s before next launch...")
-                time.sleep(interval)
+                print(f"\nWaiting {interval}s before next launch ({remaining} remaining)...")
+                for i in range(interval, 0, -1):
+                    print(f"\rCountdown: {i}s...   ", end='', flush=True)
+                    time.sleep(1)
+                print("\rLaunching next instance...       ")
+                print()
+        
+        print()
+        M_UI.success("All instances launched!")
+        time.sleep(2)
         
         M_Monitor.start_time = time.time()
         M_Webhook.send("startup", "All Instances", "Started", "00:00:00")
