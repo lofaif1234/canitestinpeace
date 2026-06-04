@@ -231,41 +231,64 @@ class M_Shell:
     
     @staticmethod
     def get_window_bounds(index: int, total: int = 1) -> str:
-        """Calculate window bounds for grid layout - auto arranges based on count"""
+        """Calculate window bounds for grid layout - 2x2 grid with 5th in center"""
         screen_w, screen_h = M_Shell.detect_screen_size()
         margin = 20
         
-        # Calculate grid layout based on total instances
+        # Status bar offset (for Android status bar)
+        status_bar = 80
+        
         if total == 1:
-            # Single instance - centered
+            # Single instance - centered large
             cell_w = screen_w - 100
-            cell_h = screen_h - 200
+            cell_h = screen_h - 250
             left = (screen_w - cell_w) // 2
-            top = 100
+            top = status_bar + 20
         elif total == 2:
-            # Side by side
+            # Side by side (horizontal split)
             cell_w = (screen_w - margin * 3) // 2
             cell_h = screen_h - 200
-            col = (index - 1) % 2
+            col = index - 1
             left = margin + col * (cell_w + margin)
-            top = 100
-        elif total <= 4:
+            top = status_bar + 20
+        elif total == 3:
+            # 2 on top, 1 centered below
+            cell_w = (screen_w - margin * 3) // 2
+            cell_h = (screen_h - margin * 4) // 2
+            if index <= 2:
+                # Top row
+                col = index - 1
+                left = margin + col * (cell_w + margin)
+                top = status_bar + 20
+            else:
+                # 3rd in center bottom
+                left = (screen_w - cell_w) // 2
+                top = status_bar + 20 + cell_h + margin
+        elif total == 4:
             # 2x2 grid
             cell_w = (screen_w - margin * 3) // 2
-            cell_h = (screen_h - margin * 3) // 2
+            cell_h = (screen_h - margin * 4) // 2
             col = (index - 1) % 2
             row = (index - 1) // 2
             left = margin + col * (cell_w + margin)
-            top = margin + row * (cell_h + margin)
+            top = status_bar + 20 + row * (cell_h + margin)
         else:
-            # 3x2 or more grid
-            cols = 3
-            cell_w = (screen_w - margin * (cols + 1)) // cols
-            cell_h = (screen_h - margin * 3) // 2
-            col = (index - 1) % cols
-            row = (index - 1) // cols
-            left = margin + col * (cell_w + margin)
-            top = margin + row * (cell_h + margin)
+            # 5+ instances: 2x2 with extras in middle
+            # First 4 in 2x2 grid
+            cell_w = (screen_w - margin * 3) // 2
+            cell_h = (screen_h - margin * 4) // 2
+            
+            if index <= 4:
+                col = (index - 1) % 2
+                row = (index - 1) // 2
+                left = margin + col * (cell_w + margin)
+                top = status_bar + 20 + row * (cell_h + margin)
+            else:
+                # 5th and beyond - smaller in center
+                cell_w = (screen_w - margin * 3) // 2 - 50
+                cell_h = (screen_h - margin * 4) // 2 - 50
+                left = (screen_w - cell_w) // 2
+                top = (screen_h - cell_h) // 2
         
         right = left + cell_w
         bottom = top + cell_h
@@ -1060,21 +1083,21 @@ class M_Dashboard:
     
     @staticmethod
     def render():
-        """Render dashboard display"""
-        M_UI.clear()
-        M_UI.banner()
+        """Render dashboard display - simplified to avoid corruption with floating windows"""
+        # Move cursor to top instead of full clear (reduces flicker)
+        print('\033[H', end='', flush=True)
         
-        # Status line
-        print("╔══════════════════════════════════════════════════════════╗")
-        status_line = "║  " + M_UI.color('cyan', 'NOKA Live Monitor') + " — Press Q to stop, R to restart all" + " " * 19 + "║"
-        print(status_line)
-        print("╠══════╦══════════════════╦══════════╦═════════╦══════════╣")
-        header = "║  " + M_UI.color('bold', '#') + "   ║ " + M_UI.color('bold', 'Package') + " " * 11 + "║ " + M_UI.color('bold', 'Status') + "  ║ " + M_UI.color('bold', 'Uptime') + "  ║ " + M_UI.color('bold', 'Next Act') + " ║"
-        print(header)
-        print("╠══════╬══════════════════╬══════════╬═════════╬══════════╣")
+        # Simple header without banner (prevents corruption)
+        print(M_UI.color('cyan', "═" * 58))
+        print(M_UI.color('cyan', "         NOKA MONITOR - Press Q to stop, R to restart"))
+        print(M_UI.color('cyan', "═" * 58))
         
         packages = M_Config.get("packages", [])
         count = 0
+        
+        print()
+        print(f"{'#':<4} {'Package':<18} {'Status':<12} {'Uptime':<10}")
+        print("-" * 58)
         
         for pkg in packages:
             if not pkg.get("enabled"):
@@ -1085,9 +1108,9 @@ class M_Dashboard:
             
             # Format status
             if status["status"] == "alive":
-                status_display = M_UI.color('green', '✅ Live')
+                status_display = M_UI.color('green', '● Live')
             elif status["status"] == "slow":
-                status_display = M_UI.color('yellow', '⚠ Slow')
+                status_display = M_UI.color('yellow', '◐ Slow')
             else:
                 status_display = M_UI.color('red', '❌ Crash')
             
@@ -1099,21 +1122,21 @@ class M_Dashboard:
             if len(name) > 15:
                 name = name[:12] + "..."
             
-            # Print row
-            row = f"║  {count:2d}   ║ {name:15s} ║ {status_display} ║ {uptime_str} ║    --    ║"
+            # Print row (simple format)
+            row = f"{count:<4} {name:<18} {status_display:<12} {uptime_str:<10}"
             print(row)
         
         if count == 0:
-            print("║        ║ No instances running                         ║          ║          ║")
+            print("     No instances running")
         
-        print("╚══════╩══════════════════╩══════════╩═════════╩══════════╝")
+        print("-" * 58)
         
         # Footer info
         if M_Monitor.start_time:
             total_uptime = M_Monitor.format_uptime(int(time.time() - M_Monitor.start_time))
             print(f"\nTotal uptime: {total_uptime}  |  Restarts: {M_Monitor.total_restarts}")
         
-        print("\nControls: Q=Quit  R=Restart All  Space=Pause/Resume")
+        print("\n[Controls: Q=Quit  R=Restart All  Space=Pause]")
     
     @staticmethod
     def handle_input():
@@ -1132,6 +1155,17 @@ class M_Dashboard:
     def start():
         """Start dashboard monitoring"""
         M_Monitor.running = True
+        
+        # Show warning about floating windows
+        M_UI.clear()
+        print(M_UI.color('yellow', "⚠ NOTE: Floating windows may cause display glitches"))
+        print(M_UI.color('yellow', "   This is normal - the monitor still works in background"))
+        print()
+        print("Press Enter to continue...")
+        try:
+            input()
+        except:
+            pass
         
         # Launch instances
         if not M_Monitor.launch_all():
