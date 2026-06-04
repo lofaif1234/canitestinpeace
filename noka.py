@@ -1380,13 +1380,17 @@ class MenuHandlers:
                 choice = "2"
             elif code == 0 and stdout:
                 found_packages = []
+                # Strip carriage returns that Android shell may include
+                stdout = stdout.replace('\r', '')
                 for line in stdout.strip().split('\n'):
                     if 'package:' in line:
                         pkg = line.replace('package:', '').strip()
                         found_packages.append(pkg)
                 
                 # Print all found packages in a clean list
-                print(f"\nFound {len(found_packages)} package(s):")
+                print("")
+                print(f"Found {len(found_packages)} package(s):")
+                print("")
                 for pkg in found_packages:
                     nickname = pkg.replace('com.roblox.client', 'Roblox').replace('.', ' ').title()
                     packages.append({
@@ -1394,8 +1398,9 @@ class MenuHandlers:
                         "nickname": nickname,
                         "enabled": True
                     })
-                    print(f"  • {pkg}")
-                print()
+                    sys.stdout.write(f"  - {pkg}\n")
+                    sys.stdout.flush()
+                print("")
                 
                 if not packages:
                     print("No Roblox packages found. Please install Roblox from Play Store.")
