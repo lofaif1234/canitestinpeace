@@ -1394,13 +1394,14 @@ class MenuHandlers:
                         "enabled": True
                     })
                 
-                # Print summary
+                # Print summary - only show first 3 to avoid terminal wrapping
                 print("")
                 print(f"Found {len(found_packages)} package(s):")
-                for i, pkg in enumerate(found_packages, 1):
-                    print(f"  {i}. {pkg}", flush=True)
-                    time.sleep(0.01)
-                print("", flush=True)
+                for i, pkg in enumerate(found_packages[:3], 1):
+                    print(f"  {i}. {pkg}")
+                if len(found_packages) > 3:
+                    print(f"  ... and {len(found_packages) - 3} more")
+                print("")
                 
                 if not packages:
                     print("No Roblox packages found. Please install Roblox from Play Store.")
