@@ -369,13 +369,13 @@ class M_Config:
             M_UI.error(f"Failed to save config: {e}")
     
     @staticmethod
-    def get(key: str = None) -> Any:
-        """Get configuration value"""
+    def get(key: str = None, default: Any = None) -> Any:
+        """Get configuration value with optional default"""
         if not M_Config.data:
             M_Config.load()
         
         if key:
-            return M_Config.data.get(key)
+            return M_Config.data.get(key, default)
         return M_Config.data
     
     @staticmethod
