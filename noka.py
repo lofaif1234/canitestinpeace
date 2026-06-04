@@ -1390,10 +1390,7 @@ class MenuHandlers:
                         pkg = line.replace('package:', '').strip()
                         found_packages.append(pkg)
                 
-                # Print all found packages in a clean list
-                print("")
-                print(f"Found {len(found_packages)} package(s):")
-                print("")
+                # Build packages list
                 for pkg in found_packages:
                     nickname = pkg.replace('com.roblox.client', 'Roblox').replace('.', ' ').title()
                     packages.append({
@@ -1401,8 +1398,12 @@ class MenuHandlers:
                         "nickname": nickname,
                         "enabled": True
                     })
-                    sys.stdout.write(f"  - {pkg}\n")
-                    sys.stdout.flush()
+                
+                # Print summary
+                print("")
+                print(f"Found {len(found_packages)} package(s):")
+                for i, pkg in enumerate(found_packages, 1):
+                    print(f"  {i}. {pkg}")
                 print("")
                 
                 if not packages:
@@ -1425,10 +1426,13 @@ class MenuHandlers:
                     "enabled": True
                 })
         
-        # Get nicknames
+        # Get nicknames - clear screen first to reset terminal
+        M_UI.clear()
+        print("Package Nicknames")
+        print("-" * 40)
         for i, pkg in enumerate(packages):
-            print(f"\nNickname for {pkg['id']}:")
-            nickname = M_UI.prompt(f"Name [default: {pkg['nickname']}]:")
+            print(f"\nPackage {i+1}: {pkg['id']}")
+            nickname = M_UI.prompt(f"Nickname [{pkg['nickname']}]: ")
             if nickname:
                 packages[i]["nickname"] = nickname
         
