@@ -267,21 +267,21 @@ class M_Shell:
             M_UI.info("✓ Resized using am resize-task")
             return
         
-        # Method 3: Use wm size/position commands
-        # This sets the override bounds for the window
-        cmd = f"su -c 'wm overscan {bounds}'"
-        stdout, stderr, code = M_Shell.exec(cmd)
+        # Method 3: Try using appops to set mode (for some Android versions)
+        cmd = f"su -c 'cmd appops set {package} SYSTEM_ALERT_WINDOW allow'"
+        M_Shell.exec(cmd)
         
-        # Method 4: Try to move window directly
-        cmd = f"su -c 'input tap {left + 50} {top + 50}'"  # Tap window to focus
+        # Method 4: Try to focus and drag window to position
+        # First tap to focus
+        cmd = f"su -c 'input tap {left + 100} {top + 100}'"
         M_Shell.exec(cmd)
         time.sleep(0.5)
         
-        # Try using settings put for window size
-        cmd = f"su -c 'settings put global window_animation_scale 0'"
+        # Try using wm dismiss-keyguard to ensure window is visible
+        cmd = f"su -c 'wm dismiss-keyguard'"
         M_Shell.exec(cmd)
         
-        M_UI.info("Resize attempted (results may vary by Android version)")
+        M_UI.info("Resize attempted (use manual layout if needed)")
     
     @staticmethod
     def get_window_bounds(index: int, total: int = 1) -> str:
