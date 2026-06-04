@@ -189,7 +189,10 @@ class M_Shell:
                 text=True,
                 timeout=timeout
             )
-            return result.stdout, result.stderr, result.returncode
+            # Strip carriage returns from Android shell output
+            stdout = result.stdout.replace('\r', '') if result.stdout else ""
+            stderr = result.stderr.replace('\r', '') if result.stderr else ""
+            return stdout, stderr, result.returncode
         except subprocess.TimeoutExpired:
             return "", "Command timed out", 124
         except Exception as e:
