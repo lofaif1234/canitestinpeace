@@ -303,10 +303,7 @@ class M_Shell:
         
         # Check if package is installed (with root if available)
         M_UI.info("Checking if package is installed...")
-        
-        # Try to use root for pm path if available
-        root_check, _, root_ok = M_Shell.exec("test -f /system/bin/su && echo yes || echo no")
-        has_root = root_ok == 0 and "yes" in root_check
+        has_root = M_Shell.has_root()
         
         if has_root:
             stdout, stderr, code = M_Shell.exec(f"su -c 'pm path {package}'")
@@ -323,35 +320,30 @@ class M_Shell:
         
         url = f"roblox://placeId={place_id}"
         
-        # Try multiple launch methods (with root if available)
+        # Build commands - different format for root vs non-root
         methods = []
-        su_prefix = f"su -c '" if has_root else ""
-        su_suffix = "'" if has_root else ""
         
-        # Method 1: Freeform with bounds
+        # Method 1: Freeform with bounds (if bounds provided)
         if window_bounds:
-            methods.append({
-                "name": "Freeform with bounds",
-                "cmd": f"{su_prefix}am start -a android.intent.action.VIEW -d '{url}' -f 0x20000000 --windowingMode 5 --windowBounds {window_bounds} {package}{su_suffix}"
-            })
+            if has_root:
+                cmd = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x20000000 --windowingMode 5 --windowBounds {window_bounds} {package}'"
+            else:
+                cmd = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x20000000 --windowingMode 5 --windowBounds {window_bounds} {package}"
+            methods.append({"name": "Freeform with bounds", "cmd": cmd})
         
         # Method 2: Standard URL launch
-        methods.append({
-            "name": "Standard URL launch",
-            "cmd": f"{su_prefix}am start -a android.intent.action.VIEW -d '{url}' {package}{su_suffix}"
-        })
+        if has_root:
+            cmd = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" {package}'"
+        else:
+            cmd = f"am start -a android.intent.action.VIEW -d \"{url}\" {package}"
+        methods.append({"name": "Standard URL launch", "cmd": cmd})
         
-        # Method 3: Explicit activity
-        methods.append({
-            "name": "Package explicit launch",
-            "cmd": f"{su_prefix}am start -a android.intent.action.VIEW -d '{url}' -n {package}/com.roblox.client.Activity{su_suffix}"
-        })
-        
-        # Method 4: Simple launch
-        methods.append({
-            "name": "Simple launch",
-            "cmd": f"{su_prefix}am start -n {package}/com.roblox.client.Activity{su_suffix}"
-        })
+        # Method 3: Simple launch (no URL, just open app)
+        if has_root:
+            cmd = f"su -c 'am start -n {package}/com.roblox.client.Activity'"
+        else:
+            cmd = f"am start -n {package}/com.roblox.client.Activity"
+        methods.append({"name": "Simple launch", "cmd": cmd})
         
         # Try each method
         for i, method in enumerate(methods, 1):
@@ -929,7 +921,9 @@ class M_Monitor:
             M_Monitor.instances[pkg["id"]] = {
                 "start_time": time.time(),
                 "restarts": 0,
-                "paused": False
+                "paused": False,
+                "position": idx,
+                "total": total_packages
             }
             
             # Auto-calculate bounds based on position and total
@@ -1017,12 +1011,14 @@ class M_Monitor:
         M_UI.success("All instances stopped")
     
     @staticmethod
-    def restart_instance(pkg: Dict):
-        """Restart specific instance"""
+    def restart_instance(pkg: Dict, position: int = 1, total: int = 1):
+        """Restart specific instance with proper bounds"""
         place_id = M_Config.get("place_id")
+        bounds = M_Shell.get_window_bounds(position, total)
+        
         M_Shell.kill_app(pkg["id"])
         time.sleep(2)
-        M_Shell.launch_app(pkg["id"], place_id)
+        M_Shell.launch_app(pkg["id"], place_id, bounds)
         
         if pkg["id"] in M_Monitor.instances:
             M_Monitor.instances[pkg["id"]]["start_time"] = time.time()
@@ -1039,7 +1035,11 @@ class M_Monitor:
         
         policy = M_Config.get("restart_policy", "crash_only")
         if policy in ["crash_only", "scheduled"]:
-            M_Monitor.restart_instance(pkg)
+            # Get position info if available
+            instance_data = M_Monitor.instances.get(pkg["id"], {})
+            position = instance_data.get("position", 1)
+            total = instance_data.get("total", 1)
+            M_Monitor.restart_instance(pkg, position, total)
     
     @staticmethod
     def format_uptime(seconds: int) -> str:
