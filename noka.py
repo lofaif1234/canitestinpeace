@@ -370,13 +370,6 @@ class M_Shell:
         pkg_path = stdout.split("package:")[1].strip() if "package:" in stdout else stdout.strip()
         M_UI.info(f"✓ Package found: {pkg_path}")
         
-        # Store package and bounds for post-launch resize
-        launch_info = {
-            "package": package,
-            "bounds": window_bounds,
-            "has_root": has_root
-        }
-        
         url = f"roblox://placeId={place_id}"
         
         # Build commands - different format for root vs non-root
@@ -421,9 +414,6 @@ class M_Shell:
             
             if code == 0:
                 M_UI.success(f"✓ Success with method: {method['name']}")
-                # Post-launch resize if needed
-                if window_bounds and launch_info["has_root"]:
-                    M_Shell.resize_window_after_launch(package, window_bounds)
                 return True
             else:
                 M_UI.info(f"✗ Method {i} failed (code: {code})")
@@ -963,15 +953,16 @@ class M_Monitor:
         print(f"Default Place ID: {place_id}")
         print(f"Cooldown between launches: {interval}s")
         print()
-        print("Layout preview:")
+        print("Layout preview (resize windows manually to match):")
         
         # Show layout preview
         for i in range(1, total_packages + 1):
             pkg = enabled_packages[i - 1]
             bounds = M_Shell.get_window_bounds(i, total_packages)
-            print(f"  [{i}] {pkg.get('nickname', pkg['id']):15s} -> Position {bounds}")
+            print(f"  [{i}] {pkg.get('nickname', pkg['id']):15s} -> {bounds}")
         
         print()
+        print(M_UI.color('yellow', "NOTE: Auto-resize not supported - resize/position windows manually"))
         print(M_UI.color('yellow', f"Starting in {interval} seconds..."))
         print(M_UI.color('cyan', "Press Ctrl+C to cancel"))
         print()
@@ -1157,60 +1148,26 @@ class M_Dashboard:
     
     @staticmethod
     def render():
-        """Render dashboard display - simplified to avoid corruption with floating windows"""
-        # Move cursor to top instead of full clear (reduces flicker)
-        print('\033[H', end='', flush=True)
-        
-        # Simple header without banner (prevents corruption)
-        print(M_UI.color('cyan', "═" * 58))
-        print(M_UI.color('cyan', "         NOKA MONITOR - Press Q to stop, R to restart"))
-        print(M_UI.color('cyan', "═" * 58))
-        
+        """Render dashboard - plain text to avoid corruption with floating windows"""
         packages = M_Config.get("packages", [])
-        count = 0
-        
-        print()
-        print(f"{'#':<4} {'Package':<18} {'Status':<12} {'Uptime':<10}")
-        print("-" * 58)
+        alive = 0
+        crashed = 0
         
         for pkg in packages:
             if not pkg.get("enabled"):
                 continue
-            
-            count += 1
             status = M_Monitor.check_instance_status(pkg)
-            
-            # Format status
             if status["status"] == "alive":
-                status_display = M_UI.color('green', '● Live')
-            elif status["status"] == "slow":
-                status_display = M_UI.color('yellow', '◐ Slow')
+                alive += 1
             else:
-                status_display = M_UI.color('red', '❌ Crash')
-            
-            # Format uptime
-            uptime_str = M_Monitor.format_uptime(status["uptime"])
-            
-            # Package name (truncate)
-            name = pkg.get("nickname", pkg["id"])
-            if len(name) > 15:
-                name = name[:12] + "..."
-            
-            # Print row (simple format)
-            row = f"{count:<4} {name:<18} {status_display:<12} {uptime_str:<10}"
-            print(row)
+                crashed += 1
         
-        if count == 0:
-            print("     No instances running")
-        
-        print("-" * 58)
-        
-        # Footer info
-        if M_Monitor.start_time:
-            total_uptime = M_Monitor.format_uptime(int(time.time() - M_Monitor.start_time))
-            print(f"\nTotal uptime: {total_uptime}  |  Restarts: {M_Monitor.total_restarts}")
-        
-        print("\n[Controls: Q=Quit  R=Restart All  Space=Pause]")
+        # Single status line (doesn't get corrupted by overlays)
+        status_line = f"[{alive} live"
+        if crashed > 0:
+            status_line += f" | {crashed} down"
+        status_line += "] Monitor: Q=stop R=restart"
+        print(f"\r{status_line}", end='', flush=True)
     
     @staticmethod
     def handle_input():
@@ -1230,35 +1187,20 @@ class M_Dashboard:
         """Start dashboard monitoring"""
         M_Monitor.running = True
         
-        # Show warning about floating windows
-        M_UI.clear()
-        print(M_UI.color('yellow', "⚠ NOTE: Floating windows may cause display glitches"))
-        print(M_UI.color('yellow', "   This is normal - the monitor still works in background"))
-        print()
-        print("Press Enter to continue...")
-        try:
-            input()
-        except:
-            pass
-        
         # Launch instances
         if not M_Monitor.launch_all():
             M_UI.error("Failed to launch instances")
             return
         
+        print("\n[NOKA Monitor Started]")
+        print("Controls: Q=stop  R=restart  Space=pause")
+        print("NOTE: Auto-resize not available - resize windows manually if needed")
+        print()
+        
         # Monitoring loop
         last_check = 0
+        last_render = 0
         last_auth_check = time.time()
-        
-        # Set up stdin for non-blocking input
-        old_settings = None
-        try:
-            import tty
-            import termios
-            old_settings = termios.tcgetattr(sys.stdin)
-            tty.setraw(sys.stdin.fileno())
-        except:
-            pass
         
         try:
             while M_Monitor.running:
@@ -1268,33 +1210,37 @@ class M_Dashboard:
                 if current_time - last_auth_check >= 300:
                     valid, msg = M_Auth.check_license()
                     if not valid:
-                        M_UI.error(f"License validation failed: {msg}")
-                        M_UI.error("NOKA will now exit. Please reactivate.")
+                        print(f"\nLicense validation failed: {msg}")
+                        print("NOKA will now exit.")
                         M_Monitor.running = False
                         M_Monitor.stop_all()
                         break
                     last_auth_check = current_time
                 
-                # Render dashboard
-                M_Dashboard.render()
+                # Render dashboard every 5 seconds (reduces flicker)
+                if current_time - last_render >= 5:
+                    M_Dashboard.render()
+                    last_render = current_time
                 
-                # Check for input
+                # Check for input (non-blocking)
                 char = M_Dashboard.handle_input()
                 if char:
                     if char == 'q':
+                        print("\nStopping monitor...")
                         break
                     elif char == 'r':
-                        M_UI.info("Restarting all instances...")
+                        print("\nRestarting all instances...")
                         M_Monitor.stop_all()
                         time.sleep(2)
                         M_Monitor.launch_all()
+                        print("\n[Monitor Restarted]")
                     elif char == ' ':
                         # Pause/resume
                         for pkg_id in M_Monitor.instances:
                             M_Monitor.instances[pkg_id]["paused"] = not M_Monitor.instances[pkg_id].get("paused", False)
                 
-                # Check instance status
-                if current_time - last_check >= 10:  # Check every 10 seconds
+                # Check instance status every 15 seconds
+                if current_time - last_check >= 15:
                     packages = M_Config.get("packages", [])
                     for pkg in packages:
                         if pkg.get("enabled") and not M_Monitor.instances.get(pkg["id"], {}).get("paused", False):
@@ -1305,14 +1251,8 @@ class M_Dashboard:
                 
                 time.sleep(1)
         
-        finally:
-            # Restore terminal settings
-            if old_settings:
-                try:
-                    import termios
-                    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-                except:
-                    pass
+        except KeyboardInterrupt:
+            print("\nInterrupted.")
         
         M_Monitor.stop_all()
         M_Webhook.send("shutdown", "All Instances", "Stopped", "00:00:00")
