@@ -960,7 +960,7 @@ class M_Monitor:
         print(M_UI.color('cyan', "╚══════════════════════════════════════════════════════════╝"))
         print()
         print(f"Total instances to launch: {total_packages}")
-        print(f"Place ID: {place_id}")
+        print(f"Default Place ID: {place_id}")
         print(f"Cooldown between launches: {interval}s")
         print()
         print("Layout preview:")
@@ -1020,17 +1020,20 @@ class M_Monitor:
             print("-" * 50)
             print()
             
+            # Use per-package place_id or fallback to global
+            pkg_place_id = pkg.get("place_id", place_id) or place_id
+            
             # Launch current instance
             print(f"📦 Package: {pkg['id']}")
             print(f"📍 Position: {bounds}")
-            print(f"🎯 Place ID: {place_id}")
+            print(f"🎯 Place ID: {pkg_place_id}")
             print()
             
             print(f"[{idx}/{total_packages}] Launching {pkg.get('nickname', pkg['id'])}...")
             M_Shell.kill_app(pkg["id"])
             time.sleep(1)
             
-            success = M_Shell.launch_app(pkg["id"], place_id, bounds)
+            success = M_Shell.launch_app(pkg["id"], pkg_place_id, bounds)
             
             if success:
                 M_UI.success(f"✓ Launched {pkg.get('nickname', pkg['id'])}")
@@ -1083,12 +1086,13 @@ class M_Monitor:
     @staticmethod
     def restart_instance(pkg: Dict, position: int = 1, total: int = 1):
         """Restart specific instance with proper bounds"""
-        place_id = M_Config.get("place_id")
+        global_place_id = M_Config.get("place_id")
+        pkg_place_id = pkg.get("place_id", global_place_id) or global_place_id
         bounds = M_Shell.get_window_bounds(position, total)
         
         M_Shell.kill_app(pkg["id"])
         time.sleep(2)
-        M_Shell.launch_app(pkg["id"], place_id, bounds)
+        M_Shell.launch_app(pkg["id"], pkg_place_id, bounds)
         
         if pkg["id"] in M_Monitor.instances:
             M_Monitor.instances[pkg["id"]]["start_time"] = time.time()
@@ -1385,16 +1389,7 @@ class MenuHandlers:
                         pkg = line.replace('package:', '').strip()
                         found_packages.append(pkg)
                 
-                # Build packages list
-                for pkg in found_packages:
-                    nickname = pkg.replace('com.roblox.client', 'Roblox').replace('.', ' ').title()
-                    packages.append({
-                        "id": pkg,
-                        "nickname": nickname,
-                        "enabled": True
-                    })
-                
-                # Print summary - only show first 3 to avoid terminal wrapping
+                # Print summary
                 print("")
                 print(f"Found {len(found_packages)} package(s):")
                 for i, pkg in enumerate(found_packages[:3], 1):
@@ -1403,10 +1398,50 @@ class MenuHandlers:
                     print(f"  ... and {len(found_packages) - 3} more")
                 print("")
                 
-                if not packages:
+                if not found_packages:
                     print("No Roblox packages found. Please install Roblox from Play Store.")
                     M_UI.pause()
                     return
+                
+                # Ask which packages to use
+                print("Use all packages or select specific ones?")
+                print("1) Use ALL")
+                print("2) Select specific ones")
+                use_choice = M_UI.prompt("Choice:")
+                
+                if use_choice == "2":
+                    selected = []
+                    print("\nEnter package numbers to use (e.g. 1,3,5 or 1-3):")
+                    selection = M_UI.prompt("Selection:")
+                    try:
+                        indices = set()
+                        for part in selection.split(','):
+                            if '-' in part:
+                                start, end = part.split('-')
+                                indices.update(range(int(start)-1, int(end)))
+                            else:
+                                indices.add(int(part)-1)
+                        for idx in sorted(indices):
+                            if 0 <= idx < len(found_packages):
+                                pkg = found_packages[idx]
+                                selected.append(pkg)
+                        if not selected:
+                            print("No valid selection. Using all.")
+                            selected = found_packages
+                    except:
+                        print("Invalid input. Using all.")
+                        selected = found_packages
+                else:
+                    selected = found_packages
+                
+                # Build packages list
+                for pkg in selected:
+                    packages.append({
+                        "id": pkg,
+                        "nickname": "",
+                        "enabled": True,
+                        "place_id": ""
+                    })
             else:
                 print("No Roblox packages found.")
                 M_UI.pause()
@@ -1428,31 +1463,55 @@ class MenuHandlers:
             packages[i]["nickname"] = f"Roblox {i+1}"
         print(f"Auto-assigned nicknames: Roblox 1 to Roblox {len(packages)}")
         
-        # Step 2: Place ID
+        # Step 2: Place ID configuration
         M_UI.wizard_step(2, total_steps, "Game Configuration")
-        print("Enter your Roblox game URL or Place ID:")
-        print("Examples:")
-        print("  - https://www.roblox.com/games/1234567890/Game-Name")
-        print("  - 1234567890 (just the numbers)")
-        print()
+        print("Place ID setup:")
+        print("1) SAME Place ID for ALL selected packages")
+        print("2) DIFFERENT Place ID per package")
+        place_choice = M_UI.prompt("Choice:")
         
-        url = M_UI.prompt("URL or Place ID:")
-        
-        # Extract place ID from URL
-        place_id = ""
-        if url.isdigit():
-            place_id = url
-        elif "roblox.com/games/" in url:
-            place_id = url.split("/games/")[1].split("/")[0]
-        
-        if place_id:
-            print(f"\n✓ Place ID: {place_id}")
-            M_Config.set("place_id", place_id)
-            M_Config.set("game_url", url)
+        if place_choice == "2":
+            # Different per package
+            for i, pkg in enumerate(packages):
+                print(f"\nPackage: {pkg['id']} ({pkg['nickname']})")
+                url = M_UI.prompt("Place ID or URL:")
+                place_id = ""
+                if url.isdigit():
+                    place_id = url
+                elif "roblox.com/games/" in url:
+                    place_id = url.split("/games/")[1].split("/")[0]
+                if place_id:
+                    packages[i]["place_id"] = place_id
+                    print(f"✓ Place ID: {place_id}")
+                else:
+                    print("✗ Invalid - skipped")
+            # Use first package's place_id as default
+            default_place = packages[0].get("place_id", "") if packages else ""
+            M_Config.set("place_id", default_place)
         else:
-            print("\n✗ Invalid URL format")
-            M_UI.pause()
-            return
+            # Same for all
+            print("\nEnter your Roblox game URL or Place ID:")
+            print("Examples:")
+            print("  - https://www.roblox.com/games/1234567890/Game-Name")
+            print("  - 1234567890 (just the numbers)")
+            url = M_UI.prompt("URL or Place ID:")
+            
+            place_id = ""
+            if url.isdigit():
+                place_id = url
+            elif "roblox.com/games/" in url:
+                place_id = url.split("/games/")[1].split("/")[0]
+            
+            if place_id:
+                print(f"\n✓ Place ID: {place_id}")
+                M_Config.set("place_id", place_id)
+                M_Config.set("game_url", url)
+                for i in range(len(packages)):
+                    packages[i]["place_id"] = place_id
+            else:
+                print("\n✗ Invalid URL format")
+                M_UI.pause()
+                return
         
         # Step 3: Launch Interval
         M_UI.wizard_step(3, total_steps, "Launch Settings")
@@ -1501,7 +1560,12 @@ class MenuHandlers:
         print("\n✓ Configuration saved!")
         print(f"\nSummary:")
         print(f"  - Packages: {len(packages)}")
-        print(f"  - Place ID: {place_id}")
+        # Show first few place IDs
+        for i, p in enumerate(packages[:3]):
+            pid = p.get('place_id', 'N/A')
+            print(f"  - {p['nickname']}: Place ID {pid}")
+        if len(packages) > 3:
+            print(f"  ... and {len(packages) - 3} more")
         print(f"  - Launch Interval: {M_Config.get('launch_interval')}s")
         print(f"  - Webhook: {'Enabled' if M_Config.get('webhook', {}).get('enabled') else 'Disabled'}")
         print()
