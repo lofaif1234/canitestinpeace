@@ -205,6 +205,71 @@ class M_Shell:
         return code == 0
     
     @staticmethod
+    def clear_app_cache(package: str) -> bool:
+        """Clear app cache before launch (preserves login data)"""
+        has_root = M_Shell.has_root()
+        # Try cmd activity clear-app-cache first (Android 8+)
+        if has_root:
+            _, _, code = M_Shell.exec(f"su -c 'cmd activity clear-app-cache {package}'")
+        else:
+            _, _, code = M_Shell.exec(f"cmd activity clear-app-cache {package}")
+        if code == 0:
+            return True
+        # Fallback: pm clear (clears everything including login)
+        if has_root:
+            _, _, code = M_Shell.exec(f"su -c 'pm clear {package}'")
+        else:
+            _, _, code = M_Shell.exec(f"pm clear {package}")
+        return code == 0
+    
+    @staticmethod
+    def get_system_stats():
+        """Get CPU and RAM usage"""
+        cpu_percent = 0.0
+        ram_used_gb = 0.0
+        ram_total_gb = 0.0
+        
+        # CPU usage from /proc/stat
+        try:
+            def read_cpu():
+                with open('/proc/stat', 'r') as f:
+                    line = f.readline()
+                fields = list(map(int, line.split()[1:]))
+                idle = fields[3]
+                total = sum(fields)
+                return idle, total
+            
+            idle1, total1 = read_cpu()
+            import time
+            time.sleep(0.1)
+            idle2, total2 = read_cpu()
+            total_diff = total2 - total1
+            idle_diff = idle2 - idle1
+            if total_diff > 0:
+                cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
+        except:
+            cpu_percent = 0.0
+        
+        # RAM from /proc/meminfo
+        try:
+            meminfo = {}
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    if ':' in line:
+                        key, value = line.split(':', 1)
+                        meminfo[key.strip()] = int(value.split()[0])
+            
+            total_kb = meminfo.get('MemTotal', 0)
+            available_kb = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
+            ram_total_gb = total_kb / 1024 / 1024
+            ram_used_gb = (total_kb - available_kb) / 1024 / 1024
+        except:
+            ram_total_gb = 0.0
+            ram_used_gb = 0.0
+        
+        return cpu_percent, ram_used_gb, ram_total_gb
+    
+    @staticmethod
     def detect_screen_size():
         """Auto-detect screen size using wm size"""
         try:
@@ -235,8 +300,8 @@ class M_Shell:
         
         M_UI.info(f"Resizing window to {bounds}...")
         
-        # Wait a moment for window to be created
-        time.sleep(2)
+        # Wait for window to be created
+        time.sleep(3)
         
         # Parse bounds
         try:
@@ -244,42 +309,40 @@ class M_Shell:
             width = right - left
             height = bottom - top
         except:
-            M_UI.error("Invalid bounds format")
+            M_UI.warning("Invalid bounds format")
             return
         
         has_root = M_Shell.has_root()
         if not has_root:
-            M_UI.warning("Cannot resize - root required for wm commands")
             return
         
-        # Method 1: Try to find window and resize using wm
-        # Get window ID for the package
-        cmd = f"su -c 'dumpsys window | grep -A 5 {package} | grep mWinId'"
-        stdout, stderr, code = M_Shell.exec(cmd)
-        
-        # Method 2: Use am resize-task
-        # Try to resize most recent task
+        # Method 1: Try am resize-task -1 (most recent task)
         cmd = f"su -c 'am resize-task -1 {width} {height}'"
-        stdout, stderr, code = M_Shell.exec(cmd)
+        _, _, code = M_Shell.exec(cmd)
         if code == 0:
             M_UI.info("✓ Resized using am resize-task")
             return
         
-        # Method 3: Try using appops to set mode (for some Android versions)
-        cmd = f"su -c 'cmd appops set {package} SYSTEM_ALERT_WINDOW allow'"
-        M_Shell.exec(cmd)
+        # Method 2: Find task ID from dumpsys and resize specific task
+        cmd = f"su -c 'dumpsys activity activities | grep -B 2 {package} | grep taskId'"
+        stdout, _, code = M_Shell.exec(cmd)
+        if code == 0 and stdout:
+            import re
+            match = re.search(r'taskId=(\d+)', stdout)
+            if match:
+                task_id = match.group(1)
+                cmd = f"su -c 'am resize-task {task_id} {width} {height}'"
+                _, _, code = M_Shell.exec(cmd)
+                if code == 0:
+                    M_UI.info("✓ Resized using task ID")
+                    return
         
-        # Method 4: Try to focus and drag window to position
-        # First tap to focus
-        cmd = f"su -c 'input tap {left + 100} {top + 100}'"
-        M_Shell.exec(cmd)
-        time.sleep(0.5)
-        
-        # Try using wm dismiss-keyguard to ensure window is visible
-        cmd = f"su -c 'wm dismiss-keyguard'"
-        M_Shell.exec(cmd)
-        
-        M_UI.info("Resize attempted (use manual layout if needed)")
+        # Method 3: Try wm stack resize
+        cmd = f"su -c 'wm stack id resize {left} {top} {right} {bottom}'"
+        _, _, code = M_Shell.exec(cmd)
+        if code == 0:
+            M_UI.info("✓ Resized using wm stack")
+            return
     
     @staticmethod
     def get_window_bounds(index: int, total: int = 1) -> str:
@@ -348,77 +411,81 @@ class M_Shell:
     
     @staticmethod
     def launch_app(package: str, place_id: str, window_bounds: str = "") -> bool:
-        """Launch app with multiple fallback methods"""
+        """Launch app with cache clear, separate task, and auto-resize"""
         if not package or not place_id:
             M_UI.error("Package and place_id required")
             return False
         
-        # Check if package is installed (with root if available)
-        M_UI.info("Checking if package is installed...")
         has_root = M_Shell.has_root()
         
+        # Step 1: Clear cache before launch
+        M_UI.info("Clearing app cache...")
+        M_Shell.clear_app_cache(package)
+        time.sleep(1)
+        
+        # Step 2: Force-stop to ensure clean start
+        M_Shell.kill_app(package)
+        time.sleep(1)
+        
+        # Step 3: Check if package is installed
+        M_UI.info("Checking package...")
         if has_root:
-            stdout, stderr, code = M_Shell.exec(f"su -c 'pm path {package}'")
+            stdout, _, code = M_Shell.exec(f"su -c 'pm path {package}'")
         else:
-            stdout, stderr, code = M_Shell.exec(f"pm path {package}")
+            stdout, _, code = M_Shell.exec(f"pm path {package}")
         
         if code != 0 or not stdout or "package:" not in stdout:
             M_UI.error(f"Package not installed: {package}")
-            M_UI.info("Please install Roblox from the Play Store first")
             return False
-        
-        pkg_path = stdout.split("package:")[1].strip() if "package:" in stdout else stdout.strip()
-        M_UI.info(f"✓ Package found: {pkg_path}")
         
         url = f"roblox://placeId={place_id}"
         
-        # Build commands - different format for root vs non-root
+        # Build commands with CLEAR_TASK flag so each instance is independent
+        # FLAG_ACTIVITY_NEW_TASK (0x10000000) + FLAG_ACTIVITY_CLEAR_TASK (0x00008000) = 0x10008000
         methods = []
         
-        # Method 1: Freeform with bounds using windowingMode 4 (FREEFORM)
+        # Method 1: Freeform with bounds and clear-task
         if window_bounds:
             if has_root:
-                # Try with FREEFORM mode (4) instead of MULTI_WINDOW (5)
-                cmd = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x20000000 --windowingMode 4 --windowBounds {window_bounds} {package}'"
+                cmd = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 --windowingMode 5 --windowBounds {window_bounds} {package}'"
             else:
-                cmd = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x20000000 --windowingMode 4 --windowBounds {window_bounds} {package}"
-            methods.append({"name": "Freeform bounds (mode 4)", "cmd": cmd})
+                cmd = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 --windowingMode 5 --windowBounds {window_bounds} {package}"
+            methods.append({"name": "Freeform clear-task", "cmd": cmd})
             
-            # Also try with different flag combinations
             if has_root:
-                cmd2 = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10000000 --windowingMode 4 --windowBounds {window_bounds} {package}'"
+                cmd2 = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 --windowingMode 4 --windowBounds {window_bounds} {package}'"
             else:
-                cmd2 = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10000000 --windowingMode 4 --windowBounds {window_bounds} {package}"
-            methods.append({"name": "Freeform alt flags", "cmd": cmd2})
+                cmd2 = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 --windowingMode 4 --windowBounds {window_bounds} {package}"
+            methods.append({"name": "Freeform alt mode", "cmd": cmd2})
         
-        # Method 2: Standard URL launch
+        # Method 2: Standard with clear-task
         if has_root:
-            cmd = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" {package}'"
+            cmd = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 {package}'"
         else:
-            cmd = f"am start -a android.intent.action.VIEW -d \"{url}\" {package}"
-        methods.append({"name": "Standard URL launch", "cmd": cmd})
+            cmd = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 {package}"
+        methods.append({"name": "Standard clear-task", "cmd": cmd})
         
-        # Method 3: Simple launch (no URL, just open app)
+        # Method 3: Simple component launch
         if has_root:
-            cmd = f"su -c 'am start -n {package}/com.roblox.client.Activity'"
+            cmd = f"su -c 'am start -n {package}/com.roblox.client.Activity -f 0x10008000'"
         else:
-            cmd = f"am start -n {package}/com.roblox.client.Activity"
-        methods.append({"name": "Simple launch", "cmd": cmd})
+            cmd = f"am start -n {package}/com.roblox.client.Activity -f 0x10008000"
+        methods.append({"name": "Simple clear-task", "cmd": cmd})
         
         # Try each method
         for i, method in enumerate(methods, 1):
             M_UI.info(f"Trying method {i}: {method['name']}")
-            M_UI.info(f"Command: {method['cmd']}")
-            
             stdout, stderr, code = M_Shell.exec(method['cmd'])
             
             if code == 0:
-                M_UI.success(f"✓ Success with method: {method['name']}")
+                M_UI.success(f"✓ Launched with {method['name']}")
+                # Auto-resize after successful launch
+                if window_bounds:
+                    M_Shell.resize_window_after_launch(package, window_bounds)
                 return True
             else:
-                M_UI.info(f"✗ Method {i} failed (code: {code})")
                 if stderr:
-                    M_UI.info(f"Error: {stderr[:100]}")
+                    M_UI.info(f"  Error: {stderr[:80]}")
         
         M_UI.error(f"All launch methods failed for {package}")
         return False
@@ -923,61 +990,25 @@ class M_Monitor:
     total_restarts = 0
     
     @staticmethod
-    def launch_all(start_index: int = 1) -> bool:
-        """Launch all enabled instances with dashboard countdown"""
+    def launch_all(start_index: int = 1, on_update=None) -> bool:
+        """Launch all enabled instances. Optional on_update callback: (pkg, idx, total, success)"""
         config = M_Config.get()
         packages = config.get("packages", [])
         place_id = config.get("place_id")
         
         if not place_id:
-            M_UI.error("No Place ID configured. Run configuration wizard first.")
+            print("[ERROR] No Place ID configured. Run configuration wizard first.")
             return False
         
-        # Filter enabled packages
         enabled_packages = [p for p in packages if p.get("enabled")]
         total_packages = len(enabled_packages)
         
         if total_packages == 0:
-            M_UI.error("No enabled packages to launch")
+            print("[ERROR] No enabled packages to launch")
             return False
         
         interval = config.get("launch_interval", 120)
         
-        # PRE-LAUNCH COUNTDOWN DASHBOARD
-        M_UI.clear()
-        print(M_UI.color('cyan', "╔══════════════════════════════════════════════════════════╗"))
-        print(M_UI.color('cyan', "║           NOKA LAUNCH SEQUENCE - PREPARING               ║"))
-        print(M_UI.color('cyan', "╚══════════════════════════════════════════════════════════╝"))
-        print()
-        print(f"Total instances to launch: {total_packages}")
-        print(f"Default Place ID: {place_id}")
-        print(f"Cooldown between launches: {interval}s")
-        print()
-        print("Layout preview (resize windows manually to match):")
-        
-        # Show layout preview
-        for i in range(1, total_packages + 1):
-            pkg = enabled_packages[i - 1]
-            bounds = M_Shell.get_window_bounds(i, total_packages)
-            print(f"  [{i}] {pkg.get('nickname', pkg['id']):15s} -> {bounds}")
-        
-        print()
-        print(M_UI.color('yellow', "NOTE: Auto-resize not supported - resize/position windows manually"))
-        print(M_UI.color('yellow', f"Starting in {interval} seconds..."))
-        print(M_UI.color('cyan', "Press Ctrl+C to cancel"))
-        print()
-        
-        # Countdown with dashboard
-        for i in range(interval, 0, -1):
-            mins, secs = divmod(i, 60)
-            timer = f"{mins:02d}:{secs:02d}"
-            print(f"\r⏱️  Launching in: {M_UI.color('cyan', timer)}  ", end='', flush=True)
-            time.sleep(1)
-        print("\r🚀 Launch sequence starting!                ")
-        print()
-        time.sleep(1)
-        
-        # LAUNCH SEQUENCE WITH LIVE DASHBOARD
         for idx, pkg in enumerate(enabled_packages[start_index - 1:], start_index):
             M_Monitor.instances[pkg["id"]] = {
                 "start_time": time.time(),
@@ -987,75 +1018,23 @@ class M_Monitor:
                 "total": total_packages
             }
             
-            # Auto-calculate bounds based on position and total
             bounds = M_Shell.get_window_bounds(idx, total_packages)
-            
-            # Clear and show launch dashboard
-            M_UI.clear()
-            print(M_UI.color('cyan', "╔══════════════════════════════════════════════════════════╗"))
-            print(M_UI.color('cyan', f"║           LAUNCHING INSTANCE {idx}/{total_packages}                      ║"))
-            print(M_UI.color('cyan', "╚══════════════════════════════════════════════════════════╝"))
-            print()
-            
-            # Show all instances status
-            print("Instance Status:")
-            print("-" * 50)
-            for i, p in enumerate(enabled_packages, 1):
-                status = "🔄 LAUNCHING" if i == idx else ("✅ DONE" if i < idx else "⏳ WAITING")
-                if i == idx:
-                    print(f"  {M_UI.color('cyan', f'[{i}]')} {p.get('nickname', p['id']):20s} {M_UI.color('cyan', status)}")
-                elif i < idx:
-                    print(f"  [{i}] {p.get('nickname', p['id']):20s} {M_UI.color('green', status)}")
-                else:
-                    print(f"  [{i}] {p.get('nickname', p['id']):20s} {M_UI.color('yellow', status)}")
-            print("-" * 50)
-            print()
-            
-            # Use per-package place_id or fallback to global
             pkg_place_id = pkg.get("place_id", place_id) or place_id
-            
-            # Launch current instance
-            print(f"📦 Package: {pkg['id']}")
-            print(f"📍 Position: {bounds}")
-            print(f"🎯 Place ID: {pkg_place_id}")
-            print()
-            
-            print(f"[{idx}/{total_packages}] Launching {pkg.get('nickname', pkg['id'])}...")
-            M_Shell.kill_app(pkg["id"])
-            time.sleep(1)
             
             success = M_Shell.launch_app(pkg["id"], pkg_place_id, bounds)
             
-            if success:
-                M_UI.success(f"✓ Launched {pkg.get('nickname', pkg['id'])}")
-            else:
-                M_UI.error(f"✗ Failed to launch {pkg.get('nickname', pkg['id'])}")
+            if on_update:
+                on_update(pkg, idx, total_packages, success)
             
-            # Wait between launches (except for the last one)
+            # Wait between launches
             current_pos = idx - start_index + 1
             remaining = total_packages - current_pos
             if remaining > 0 and interval > 0:
-                print()
-                print(M_UI.color('yellow', f"Waiting {interval}s before next launch..."))
-                print(f"({remaining} instance{'s' if remaining > 1 else ''} remaining)")
-                print()
-                
+                # During wait, call update periodically to refresh display
                 for i in range(interval, 0, -1):
-                    mins, secs = divmod(i, 60)
-                    timer = f"{mins:02d}:{secs:02d}"
-                    print(f"\r⏱️  Next launch in: {M_UI.color('cyan', timer)}  ", end='', flush=True)
+                    if on_update and i % 5 == 0:
+                        on_update(None, idx, total_packages, True)
                     time.sleep(1)
-                print("\r" + " " * 40 + "\r", end='')
-        
-        # Final summary
-        M_UI.clear()
-        print(M_UI.color('green', "╔══════════════════════════════════════════════════════════╗"))
-        print(M_UI.color('green', "║           ALL INSTANCES LAUNCHED SUCCESSFULLY!           ║"))
-        print(M_UI.color('green', "╚══════════════════════════════════════════════════════════╝"))
-        print()
-        print(f"Total launched: {total_packages}")
-        print(f"Starting monitoring...")
-        time.sleep(2)
         
         M_Monitor.start_time = time.time()
         M_Webhook.send("startup", "All Instances", "Started", "00:00:00")
@@ -1144,36 +1123,59 @@ class M_Monitor:
 # MODULE: M_Dashboard (Live Dashboard)
 # =============================================================================
 class M_Dashboard:
-    """Live monitoring dashboard"""
+    """Live monitoring dashboard with full table"""
     
     @staticmethod
-    def render():
-        """Render dashboard - plain text to avoid corruption with floating windows"""
-        packages = M_Config.get("packages", [])
-        alive = 0
-        crashed = 0
+    def render_table(highlight_idx=None):
+        """Render full monitoring table with banner, stats, and instance rows"""
+        M_UI.clear()
+        M_UI.banner()
         
+        # CPU / RAM stats bar
+        cpu, ram_used, ram_total = M_Shell.get_system_stats()
+        ram_left = ram_total - ram_used if ram_total > 0 else 0
+        
+        stats_line = f"Cpu usage: {cpu:.1f} % | Ram usage: {ram_used:.1f} / {ram_total:.1f} GB | Ram left: {ram_left:.1f} GB"
+        print(M_UI.color('cyan', stats_line))
+        print("-" * 75)
+        
+        # Table header
+        print(f"| {'No.':<4} | {'Username':<14} | {'Package':<20} | {'Status':<9} | {'Game':<25} |")
+        print("-" * 75)
+        
+        # Table rows
+        packages = M_Config.get("packages", [])
+        row_num = 1
         for pkg in packages:
             if not pkg.get("enabled"):
                 continue
-            status = M_Monitor.check_instance_status(pkg)
-            if status["status"] == "alive":
-                alive += 1
+            
+            nickname = pkg.get("nickname", pkg["id"])[:14]
+            pkg_name = pkg["id"][:20]
+            place_id = pkg.get("place_id", M_Config.get("place_id", ""))
+            game_str = f"roblox://placeID={place_id}"[:25] if place_id else "N/A"
+            
+            # Check live status
+            status_info = M_Monitor.check_instance_status(pkg)
+            if status_info["status"] == "alive":
+                status = "Ingame"
             else:
-                crashed += 1
+                status = "Offline"
+            
+            # Highlight the row being launched
+            if highlight_idx and row_num == highlight_idx:
+                status = "> " + status
+            
+            print(f"| {row_num:<4} | {nickname:<14} | {pkg_name:<20} | {status:<9} | {game_str:<25} |")
+            row_num += 1
         
-        # Single status line (doesn't get corrupted by overlays)
-        status_line = f"[{alive} live"
-        if crashed > 0:
-            status_line += f" | {crashed} down"
-        status_line += "] Monitor: Q=stop R=restart"
-        print(f"\r{status_line}", end='', flush=True)
+        print("-" * 75)
+        print("[Controls: Q=stop  R=restart  Space=pause]")
     
     @staticmethod
     def handle_input():
         """Handle dashboard input"""
         try:
-            # Non-blocking input check
             import select
             if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
                 char = sys.stdin.read(1).lower()
@@ -1184,22 +1186,27 @@ class M_Dashboard:
     
     @staticmethod
     def start():
-        """Start dashboard monitoring"""
+        """Start dashboard monitoring - show table immediately and launch in background"""
         M_Monitor.running = True
         
-        # Launch instances
-        if not M_Monitor.launch_all():
-            M_UI.error("Failed to launch instances")
+        # Show initial table (all offline)
+        M_Dashboard.render_table()
+        
+        # Launch callback that refreshes table after each instance
+        def on_launch(pkg, idx, total, success):
+            M_Dashboard.render_table(highlight_idx=idx if pkg else None)
+        
+        # Launch all instances
+        if not M_Monitor.launch_all(on_update=on_launch):
+            print("[ERROR] Failed to launch instances")
             return
         
-        print("\n[NOKA Monitor Started]")
-        print("Controls: Q=stop  R=restart  Space=pause")
-        print("NOTE: Auto-resize not available - resize windows manually if needed")
-        print()
+        # Final render after all launched
+        M_Dashboard.render_table()
         
         # Monitoring loop
         last_check = 0
-        last_render = 0
+        last_render = time.time()
         last_auth_check = time.time()
         
         try:
@@ -1211,15 +1218,14 @@ class M_Dashboard:
                     valid, msg = M_Auth.check_license()
                     if not valid:
                         print(f"\nLicense validation failed: {msg}")
-                        print("NOKA will now exit.")
                         M_Monitor.running = False
                         M_Monitor.stop_all()
                         break
                     last_auth_check = current_time
                 
-                # Render dashboard every 5 seconds (reduces flicker)
+                # Render dashboard every 5 seconds
                 if current_time - last_render >= 5:
-                    M_Dashboard.render()
+                    M_Dashboard.render_table()
                     last_render = current_time
                 
                 # Check for input (non-blocking)
@@ -1232,10 +1238,9 @@ class M_Dashboard:
                         print("\nRestarting all instances...")
                         M_Monitor.stop_all()
                         time.sleep(2)
-                        M_Monitor.launch_all()
-                        print("\n[Monitor Restarted]")
+                        M_Monitor.launch_all(on_update=on_launch)
+                        M_Dashboard.render_table()
                     elif char == ' ':
-                        # Pause/resume
                         for pkg_id in M_Monitor.instances:
                             M_Monitor.instances[pkg_id]["paused"] = not M_Monitor.instances[pkg_id].get("paused", False)
                 
