@@ -173,6 +173,8 @@ class M_UI:
 class M_Shell:
     """Shell command execution module"""
     
+    _root_cached = None
+    
     @staticmethod
     def exec(cmd: str, timeout: int = 30) -> Tuple[str, str, int]:
         """Execute shell command with timeout"""
@@ -206,66 +208,80 @@ class M_Shell:
     
     @staticmethod
     def clear_app_cache(package: str) -> bool:
-        """Clear app cache before launch (preserves login data)"""
+        """Clear only app cache files, NOT login data"""
         has_root = M_Shell.has_root()
-        # Try cmd activity clear-app-cache first (Android 8+)
+        
+        # Method 1: Android builtin command (Android 8+)
         if has_root:
             _, _, code = M_Shell.exec(f"su -c 'cmd activity clear-app-cache {package}'")
         else:
             _, _, code = M_Shell.exec(f"cmd activity clear-app-cache {package}")
         if code == 0:
             return True
-        # Fallback: pm clear (clears everything including login)
+        
+        # Method 2: Delete only cache directory with root (preserves login)
         if has_root:
-            _, _, code = M_Shell.exec(f"su -c 'pm clear {package}'")
-        else:
-            _, _, code = M_Shell.exec(f"pm clear {package}")
-        return code == 0
+            cache_paths = [
+                f"/data/data/{package}/cache/*",
+                f"/data/data/{package}/code_cache/*",
+                f"/sdcard/Android/data/{package}/cache/*"
+            ]
+            for path in cache_paths:
+                M_Shell.exec(f"su -c 'rm -rf {path}'")
+            return True
+        
+        return False
     
     @staticmethod
     def get_system_stats():
-        """Get CPU and RAM usage"""
+        """Get real CPU and RAM usage from /proc (Linux/Android native)"""
         cpu_percent = 0.0
         ram_used_gb = 0.0
         ram_total_gb = 0.0
         
-        # CPU usage from /proc/stat
+        # --- CPU: read /proc/stat (works on all Android with root) ---
         try:
-            def read_cpu():
-                with open('/proc/stat', 'r') as f:
-                    line = f.readline()
-                fields = list(map(int, line.split()[1:]))
-                idle = fields[3]
-                total = sum(fields)
-                return idle, total
+            with open('/proc/stat', 'r') as f:
+                line1 = f.readline()
+            fields1 = list(map(int, line1.split()[1:]))
+            idle1 = fields1[3]
+            total1 = sum(fields1)
             
-            idle1, total1 = read_cpu()
             import time
-            time.sleep(0.1)
-            idle2, total2 = read_cpu()
+            time.sleep(0.2)
+            
+            with open('/proc/stat', 'r') as f:
+                line2 = f.readline()
+            fields2 = list(map(int, line2.split()[1:]))
+            idle2 = fields2[3]
+            total2 = sum(fields2)
+            
             total_diff = total2 - total1
             idle_diff = idle2 - idle1
             if total_diff > 0:
                 cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
-        except:
-            cpu_percent = 0.0
+        except Exception:
+            pass
         
-        # RAM from /proc/meminfo
+        # --- RAM: read /proc/meminfo (always readable on Android) ---
         try:
             meminfo = {}
             with open('/proc/meminfo', 'r') as f:
                 for line in f:
                     if ':' in line:
-                        key, value = line.split(':', 1)
-                        meminfo[key.strip()] = int(value.split()[0])
+                        key, val = line.split(':', 1)
+                        meminfo[key.strip()] = int(val.split()[0])
             
             total_kb = meminfo.get('MemTotal', 0)
+            # MemAvailable is the most accurate for "free" RAM on Linux 3.14+
             available_kb = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
-            ram_total_gb = total_kb / 1024 / 1024
-            ram_used_gb = (total_kb - available_kb) / 1024 / 1024
-        except:
-            ram_total_gb = 0.0
-            ram_used_gb = 0.0
+            # Used = Total - Available
+            used_kb = total_kb - available_kb
+            
+            ram_total_gb = total_kb / 1024.0 / 1024.0
+            ram_used_gb = used_kb / 1024.0 / 1024.0
+        except Exception:
+            pass
         
         return cpu_percent, ram_used_gb, ram_total_gb
     
@@ -285,11 +301,16 @@ class M_Shell:
     
     @staticmethod
     def has_root() -> bool:
-        """Check if root is available"""
+        """Check if root is available (cached to avoid spam)"""
+        if M_Shell._root_cached is not None:
+            return M_Shell._root_cached
         try:
-            stdout, _, code = M_Shell.exec("test -f /system/bin/su && echo yes || echo no")
-            return code == 0 and "yes" in stdout
+            # Single check - trigger permission dialog once
+            stdout, _, code = M_Shell.exec("su -c 'echo root_ok'")
+            M_Shell._root_cached = code == 0 and "root_ok" in stdout
+            return M_Shell._root_cached
         except:
+            M_Shell._root_cached = False
             return False
     
     @staticmethod
@@ -1030,11 +1051,8 @@ class M_Monitor:
             current_pos = idx - start_index + 1
             remaining = total_packages - current_pos
             if remaining > 0 and interval > 0:
-                # During wait, call update periodically to refresh display
-                for i in range(interval, 0, -1):
-                    if on_update and i % 5 == 0:
-                        on_update(None, idx, total_packages, True)
-                    time.sleep(1)
+                # Just sleep, no display updates during countdown
+                time.sleep(interval)
         
         M_Monitor.start_time = time.time()
         M_Webhook.send("startup", "All Instances", "Started", "00:00:00")
@@ -1126,9 +1144,11 @@ class M_Dashboard:
     """Live monitoring dashboard with full table"""
     
     @staticmethod
-    def render_table(highlight_idx=None):
-        """Render full monitoring table with banner, stats, and instance rows"""
-        M_UI.clear()
+    def render_table(highlight_idx=None, force=False):
+        """Render full monitoring table - only clears screen on first call or if forced"""
+        if force:
+            M_UI.clear()
+        
         M_UI.banner()
         
         # CPU / RAM stats bar
@@ -1189,12 +1209,12 @@ class M_Dashboard:
         """Start dashboard monitoring - show table immediately and launch in background"""
         M_Monitor.running = True
         
-        # Show initial table (all offline)
-        M_Dashboard.render_table()
+        # Show initial table (all offline) - force clear on first display
+        M_Dashboard.render_table(force=True)
         
         # Launch callback that refreshes table after each instance
         def on_launch(pkg, idx, total, success):
-            M_Dashboard.render_table(highlight_idx=idx if pkg else None)
+            M_Dashboard.render_table(highlight_idx=idx if pkg else None, force=False)
         
         # Launch all instances
         if not M_Monitor.launch_all(on_update=on_launch):
@@ -1202,7 +1222,7 @@ class M_Dashboard:
             return
         
         # Final render after all launched
-        M_Dashboard.render_table()
+        M_Dashboard.render_table(force=False)
         
         # Monitoring loop
         last_check = 0
@@ -1210,6 +1230,9 @@ class M_Dashboard:
         last_auth_check = time.time()
         
         try:
+            # Track last known statuses to only render on change
+            last_statuses = {}
+            
             while M_Monitor.running:
                 current_time = time.time()
                 
@@ -1223,10 +1246,31 @@ class M_Dashboard:
                         break
                     last_auth_check = current_time
                 
-                # Render dashboard every 5 seconds
-                if current_time - last_render >= 5:
-                    M_Dashboard.render_table()
-                    last_render = current_time
+                # Check instance status every 15 seconds
+                status_changed = False
+                if current_time - last_check >= 15:
+                    packages = M_Config.get("packages", [])
+                    for pkg in packages:
+                        if not pkg.get("enabled"):
+                            continue
+                        pkg_id = pkg["id"]
+                        is_paused = M_Monitor.instances.get(pkg_id, {}).get("paused", False)
+                        if is_paused:
+                            continue
+                        
+                        status = M_Monitor.check_instance_status(pkg)
+                        old_status = last_statuses.get(pkg_id)
+                        if status["status"] != old_status:
+                            last_statuses[pkg_id] = status["status"]
+                            status_changed = True
+                            
+                        if status["status"] == "crashed":
+                            M_Monitor.handle_crashed(pkg)
+                    last_check = current_time
+                
+                # Only re-render if a status actually changed
+                if status_changed:
+                    M_Dashboard.render_table(force=False)
                 
                 # Check for input (non-blocking)
                 char = M_Dashboard.handle_input()
@@ -1239,20 +1283,12 @@ class M_Dashboard:
                         M_Monitor.stop_all()
                         time.sleep(2)
                         M_Monitor.launch_all(on_update=on_launch)
-                        M_Dashboard.render_table()
+                        M_Dashboard.render_table(force=True)
+                        # Reset status tracking after restart
+                        last_statuses = {}
                     elif char == ' ':
                         for pkg_id in M_Monitor.instances:
                             M_Monitor.instances[pkg_id]["paused"] = not M_Monitor.instances[pkg_id].get("paused", False)
-                
-                # Check instance status every 15 seconds
-                if current_time - last_check >= 15:
-                    packages = M_Config.get("packages", [])
-                    for pkg in packages:
-                        if pkg.get("enabled") and not M_Monitor.instances.get(pkg["id"], {}).get("paused", False):
-                            status = M_Monitor.check_instance_status(pkg)
-                            if status["status"] == "crashed":
-                                M_Monitor.handle_crashed(pkg)
-                    last_check = current_time
                 
                 time.sleep(1)
         
