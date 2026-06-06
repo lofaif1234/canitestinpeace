@@ -1211,7 +1211,7 @@ class M_Dashboard:
         
         # Monitoring loop
         last_check = 0
-        last_render = time.time()
+        last_stats_render = time.time()
         last_auth_check = time.time()
         
         try:
@@ -1220,6 +1220,11 @@ class M_Dashboard:
             
             while M_Monitor.running:
                 current_time = time.time()
+                
+                # Re-render stats every 2 seconds for live CPU/RAM
+                if current_time - last_stats_render >= 2:
+                    M_Dashboard.render_table()
+                    last_stats_render = current_time
                 
                 # Periodic license check (every 5 minutes)
                 if current_time - last_auth_check >= 300:
