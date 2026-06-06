@@ -315,11 +315,9 @@ class M_Shell:
     
     @staticmethod
     def resize_window_after_launch(package: str, bounds: str):
-        """Resize window after launch using wm commands (requires root)"""
+        """Resize window after launch using wm commands (requires root) - silent"""
         if not bounds:
             return
-        
-        M_UI.info(f"Resizing window to {bounds}...")
         
         # Wait for window to be created
         time.sleep(3)
@@ -330,7 +328,6 @@ class M_Shell:
             width = right - left
             height = bottom - top
         except:
-            M_UI.warning("Invalid bounds format")
             return
         
         has_root = M_Shell.has_root()
@@ -341,7 +338,6 @@ class M_Shell:
         cmd = f"su -c 'am resize-task -1 {width} {height}'"
         _, _, code = M_Shell.exec(cmd)
         if code == 0:
-            M_UI.info("✓ Resized using am resize-task")
             return
         
         # Method 2: Find task ID from dumpsys and resize specific task
@@ -355,14 +351,12 @@ class M_Shell:
                 cmd = f"su -c 'am resize-task {task_id} {width} {height}'"
                 _, _, code = M_Shell.exec(cmd)
                 if code == 0:
-                    M_UI.info("✓ Resized using task ID")
                     return
         
         # Method 3: Try wm stack resize
         cmd = f"su -c 'wm stack id resize {left} {top} {right} {bottom}'"
         _, _, code = M_Shell.exec(cmd)
         if code == 0:
-            M_UI.info("✓ Resized using wm stack")
             return
     
     @staticmethod
@@ -493,22 +487,16 @@ class M_Shell:
             cmd = f"am start -n {package}/com.roblox.client.Activity -f 0x10008000"
         methods.append({"name": "Simple clear-task", "cmd": cmd})
         
-        # Try each method
+        # Try each method silently (no prints - menu is the only output)
         for i, method in enumerate(methods, 1):
-            M_UI.info(f"Trying method {i}: {method['name']}")
             stdout, stderr, code = M_Shell.exec(method['cmd'])
             
             if code == 0:
-                M_UI.success(f"✓ Launched with {method['name']}")
                 # Auto-resize after successful launch
                 if window_bounds:
                     M_Shell.resize_window_after_launch(package, window_bounds)
                 return True
-            else:
-                if stderr:
-                    M_UI.info(f"  Error: {stderr[:80]}")
         
-        M_UI.error(f"All launch methods failed for {package}")
         return False
 
 # =============================================================================
@@ -1144,11 +1132,9 @@ class M_Dashboard:
     """Live monitoring dashboard with full table"""
     
     @staticmethod
-    def render_table(highlight_idx=None, force=False):
-        """Render full monitoring table - only clears screen on first call or if forced"""
-        if force:
-            M_UI.clear()
-        
+    def render_table(highlight_idx=None):
+        """Render full monitoring table - clears screen so only ONE menu remains"""
+        M_UI.clear()
         M_UI.banner()
         
         # CPU / RAM stats bar
@@ -1190,7 +1176,6 @@ class M_Dashboard:
             row_num += 1
         
         print("-" * 75)
-        print("[Controls: Q=stop  R=restart  Space=pause]")
     
     @staticmethod
     def handle_input():
@@ -1209,20 +1194,20 @@ class M_Dashboard:
         """Start dashboard monitoring - show table immediately and launch in background"""
         M_Monitor.running = True
         
-        # Show initial table (all offline) - force clear on first display
-        M_Dashboard.render_table(force=True)
+        # Show initial table (all offline)
+        M_Dashboard.render_table()
         
         # Launch callback that refreshes table after each instance
         def on_launch(pkg, idx, total, success):
-            M_Dashboard.render_table(highlight_idx=idx if pkg else None, force=False)
+            M_Dashboard.render_table(highlight_idx=idx if pkg else None)
         
         # Launch all instances
         if not M_Monitor.launch_all(on_update=on_launch):
-            print("[ERROR] Failed to launch instances")
+            M_Dashboard.render_table()
             return
         
         # Final render after all launched
-        M_Dashboard.render_table(force=False)
+        M_Dashboard.render_table()
         
         # Monitoring loop
         last_check = 0
@@ -1270,7 +1255,7 @@ class M_Dashboard:
                 
                 # Only re-render if a status actually changed
                 if status_changed:
-                    M_Dashboard.render_table(force=False)
+                    M_Dashboard.render_table()
                 
                 # Check for input (non-blocking)
                 char = M_Dashboard.handle_input()
@@ -1283,7 +1268,7 @@ class M_Dashboard:
                         M_Monitor.stop_all()
                         time.sleep(2)
                         M_Monitor.launch_all(on_update=on_launch)
-                        M_Dashboard.render_table(force=True)
+                        M_Dashboard.render_table()
                         # Reset status tracking after restart
                         last_statuses = {}
                     elif char == ' ':
