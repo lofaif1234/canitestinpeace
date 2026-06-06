@@ -208,8 +208,12 @@ def find_roblox_packages():
     pkgs = []
     for line in out.splitlines():
         line = line.strip()
-        if line.startswith("package:") and "roblox" in line.lower():
-            pkgs.append(line.replace("package:", "").strip())
+        if line.startswith("package:"):
+            pkg = line.replace("package:", "").strip()
+            # Match com.roblox.<anything> — handles randomised suffixes like
+            # com.roblox.client, com.roblox.clienx, com.roblox.clixw, etc.
+            if re.match(r'^com\.roblox\..+$', pkg, re.IGNORECASE):
+                pkgs.append(pkg)
     return pkgs
 
 
