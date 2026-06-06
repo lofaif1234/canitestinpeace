@@ -259,47 +259,59 @@ class M_Shell:
     
     @staticmethod
     def get_system_stats():
-        """Get real CPU and RAM usage from /proc directly (no su needed on Android)"""
+        """Get real CPU and RAM usage from /proc (direct read + su fallback)"""
         import time
         cpu_percent = 0.0
         ram_used_gb = 0.0
         ram_total_gb = 0.0
         
-        # --- CPU: /proc/stat delta read directly ---
+        def read_proc_file(path):
+            """Try direct read first, fallback to su"""
+            try:
+                with open(path, 'r') as f:
+                    return f.read()
+            except:
+                try:
+                    stdout, _, code = M_Shell.exec(f"su -c 'cat {path}'")
+                    if code == 0:
+                        return stdout
+                except:
+                    pass
+            return ""
+        
+        # --- CPU: /proc/stat delta ---
         try:
-            with open('/proc/stat', 'r') as f:
-                line1 = f.readline()
-            fields1 = list(map(int, line1.split()[1:]))
-            idle1 = fields1[3]
-            total1 = sum(fields1)
-            
-            time.sleep(0.3)
-            
-            with open('/proc/stat', 'r') as f:
-                line2 = f.readline()
-            fields2 = list(map(int, line2.split()[1:]))
-            idle2 = fields2[3]
-            total2 = sum(fields2)
-            
-            total_diff = total2 - total1
-            idle_diff = idle2 - idle1
-            if total_diff > 0:
-                cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
+            data1 = read_proc_file('/proc/stat')
+            if data1:
+                fields1 = list(map(int, data1.splitlines()[0].split()[1:]))
+                idle1 = fields1[3]
+                total1 = sum(fields1)
+                
+                time.sleep(0.2)
+                
+                data2 = read_proc_file('/proc/stat')
+                fields2 = list(map(int, data2.splitlines()[0].split()[1:]))
+                idle2 = fields2[3]
+                total2 = sum(fields2)
+                
+                total_diff = total2 - total1
+                idle_diff = idle2 - idle1
+                if total_diff > 0:
+                    cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
         except Exception:
             pass
         
         # Fallback: /proc/loadavg
         if cpu_percent == 0.0:
             try:
-                with open('/proc/loadavg', 'r') as f:
-                    load1 = float(f.read().split()[0])
-                cores = 8
-                try:
-                    with open('/proc/cpuinfo', 'r') as f:
-                        cores = f.read().count("processor") or 8
-                except:
-                    pass
-                cpu_percent = min(100.0, (load1 / cores) * 100.0)
+                load_data = read_proc_file('/proc/loadavg')
+                if load_data:
+                    load1 = float(load_data.split()[0])
+                    cores = 8
+                    cpuinfo = read_proc_file('/proc/cpuinfo')
+                    if cpuinfo:
+                        cores = cpuinfo.count("processor") or 8
+                    cpu_percent = min(100.0, (load1 / cores) * 100.0)
             except Exception:
                 pass
         
@@ -1385,7 +1397,7 @@ class M_Dashboard:
         cpu, ram_used, ram_total = M_Shell.get_system_stats()
         ram_left = ram_total - ram_used if ram_total > 0 else 0
         
-        stats_line = f"Cpu usage: {cpu:.1f} % | Ram usage: {ram_used:.1f} / {ram_total:.1f} GB | Ram left: {ram_left:.1f} GB"
+        stats_line = f"CPU usage: {cpu:.1f} % | RAM usage: {ram_used:.1f} / {ram_total:.1f} GB | RAM left: {ram_left:.1f} GB"
         print(M_UI.color('cyan', stats_line))
         print("-" * 75)
         
