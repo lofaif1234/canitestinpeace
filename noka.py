@@ -234,114 +234,72 @@ class M_Shell:
     
     @staticmethod
     def get_system_stats():
-        """Get real CPU and RAM usage from /proc via root on Android (batched to reduce su spam)"""
-        import re
+        """Get real CPU and RAM usage from /proc directly (no su needed on Android)"""
+        import time
         cpu_percent = 0.0
         ram_used_gb = 0.0
         ram_total_gb = 0.0
         
-        # --- CPU Method 1: dumpsys cpuinfo (single su call) ---
+        # --- CPU: /proc/stat delta read directly ---
         try:
-            stdout, _, code = M_Shell.exec("su -c 'dumpsys cpuinfo -c'")
-            if code == 0 and stdout:
-                total_match = re.search(r'TOTAL[:\s]+(\d+(?:\.\d+)?)\s*%', stdout, re.IGNORECASE)
-                if total_match:
-                    cpu_percent = float(total_match.group(1))
-                else:
-                    for line in stdout.splitlines():
-                        if "usr" in line and "sys" in line:
-                            nums = re.findall(r'(\d+(?:\.\d+)?)%', line)
-                            if nums:
-                                cpu_percent = sum(float(n) for n in nums)
-                                break
-                        elif "TOTAL" in line:
-                            nums = re.findall(r'(\d+(?:\.\d+)?)%', line)
-                            if nums:
-                                cpu_percent = float(nums[-1])
-                                break
+            with open('/proc/stat', 'r') as f:
+                line1 = f.readline()
+            fields1 = list(map(int, line1.split()[1:]))
+            idle1 = fields1[3]
+            total1 = sum(fields1)
+            
+            time.sleep(0.3)
+            
+            with open('/proc/stat', 'r') as f:
+                line2 = f.readline()
+            fields2 = list(map(int, line2.split()[1:]))
+            idle2 = fields2[3]
+            total2 = sum(fields2)
+            
+            total_diff = total2 - total1
+            idle_diff = idle2 - idle1
+            if total_diff > 0:
+                cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
         except Exception:
             pass
         
-        # --- CPU Method 2: /proc/stat delta (single su call for both reads) ---
+        # Fallback: /proc/loadavg
         if cpu_percent == 0.0:
             try:
-                stdout, _, code = M_Shell.exec("su -c 'cat /proc/stat; sleep 0.5; cat /proc/stat'")
-                if code == 0 and stdout:
-                    lines = stdout.strip().splitlines()
-                    # Find the two "cpu " lines
-                    cpu_lines = [l for l in lines if l.startswith('cpu ')]
-                    if len(cpu_lines) >= 2:
-                        fields1 = list(map(int, cpu_lines[0].split()[1:]))
-                        fields2 = list(map(int, cpu_lines[1].split()[1:]))
-                        idle1, total1 = fields1[3], sum(fields1)
-                        idle2, total2 = fields2[3], sum(fields2)
-                        total_diff = total2 - total1
-                        idle_diff = idle2 - idle1
-                        if total_diff > 0:
-                            cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
+                with open('/proc/loadavg', 'r') as f:
+                    load1 = float(f.read().split()[0])
+                # Count cores from /proc/cpuinfo
+                cores = 8
+                try:
+                    with open('/proc/cpuinfo', 'r') as f:
+                        cores = f.read().count("processor") or 8
+                except:
+                    pass
+                cpu_percent = min(100.0, (load1 / cores) * 100.0)
             except Exception:
                 pass
         
-        # --- CPU Method 3: /proc/loadavg + /proc/cpuinfo (single su call) ---
-        if cpu_percent == 0.0:
-            try:
-                stdout, _, code = M_Shell.exec("su -c 'cat /proc/loadavg && cat /proc/cpuinfo'")
-                if code == 0 and stdout:
-                    parts = stdout.splitlines()[0].split()
-                    load1 = float(parts[0])
-                    cores = stdout.count("processor") or 8
-                    cpu_percent = min(100.0, (load1 / cores) * 100.0)
-            except Exception:
-                pass
-        
-        # --- CPU Method 4: vmstat ---
-        if cpu_percent == 0.0:
-            try:
-                stdout, _, code = M_Shell.exec("su -c 'vmstat 1 2'")
-                if code == 0 and stdout:
-                    lines = stdout.strip().splitlines()
-                    if len(lines) >= 3:
-                        parts = lines[-1].split()
-                        if len(parts) >= 17:
-                            idle_val = int(parts[14])
-                            cpu_percent = max(0.0, 100.0 - idle_val)
-            except Exception:
-                pass
-        
-        # --- CPU Method 5: top ---
-        if cpu_percent == 0.0:
-            try:
-                stdout, _, code = M_Shell.exec("su -c 'top -n 1 -d 0'")
-                if code == 0 and stdout:
-                    for line in stdout.splitlines():
-                        if "User" in line and "System" in line and "%" in line:
-                            matches = re.findall(r'(\d+)%', line)
-                            if matches:
-                                cpu_percent = sum(int(m) for m in matches)
-                                break
-            except Exception:
-                pass
-        
-        # --- RAM: read /proc/meminfo (single su call) ---
+        # --- RAM: /proc/meminfo read directly ---
         try:
-            stdout, _, code = M_Shell.exec("su -c 'cat /proc/meminfo'")
-            if code == 0 and stdout:
-                meminfo = {}
-                for line in stdout.splitlines():
+            meminfo = {}
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
                     if ':' in line:
                         key, val = line.split(':', 1)
                         meminfo[key.strip()] = int(val.split()[0])
-                
-                total_raw = meminfo.get('MemTotal', 0)
-                available_raw = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
-                used_raw = total_raw - available_raw
-                
-                if total_raw > 1000000000:
-                    ram_total_gb = total_raw / 1024.0 / 1024.0 / 1024.0
-                    ram_used_gb = used_raw / 1024.0 / 1024.0 / 1024.0
-                else:
-                    ram_total_gb = total_raw / 1024.0 / 1024.0
-                    ram_used_gb = used_raw / 1024.0 / 1024.0
+            
+            total_raw = meminfo.get('MemTotal', 0)
+            available_raw = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
+            used_raw = total_raw - available_raw
+            
+            if total_raw > 1000000000:
+                # Values reported in bytes despite kB label on some Android devices
+                ram_total_gb = total_raw / (1024.0 ** 3)
+                ram_used_gb = used_raw / (1024.0 ** 3)
+            else:
+                # Standard: values in KB
+                ram_total_gb = total_raw / (1024.0 ** 2)
+                ram_used_gb = used_raw / (1024.0 ** 2)
         except Exception:
             pass
         
@@ -363,84 +321,54 @@ class M_Shell:
     
     @staticmethod
     def get_package_stats(package: str) -> dict:
-        """Get CPU and memory stats for a specific package process (batched to reduce su spam)"""
-        # Get PID (single su call)
+        """Get CPU and memory stats for a specific package process"""
+        import time
+        
+        # Get PID
         stdout, _, code = M_Shell.exec(f"su -c 'pidof {package}'")
         if code != 0 or not stdout.strip():
             return {"cpu": "0.0", "mem": "0.0"}
         
         pid = stdout.strip().split()[0]
+        tmp = "/data/local/tmp/noka_stats"
         
-        # Batch all reads into a single su call with sleep between samples
         try:
-            cmd = (
-                f"su -c 'cat /proc/{pid}/stat && cat /proc/{pid}/status && cat /proc/stat; "
-                f"sleep 0.5; "
-                f"cat /proc/{pid}/stat && cat /proc/stat'"
-            )
-            stdout, _, code = M_Shell.exec(cmd)
-            if code == 0 and stdout:
-                sections = stdout.split('---NOKA_SPLIT---')
-                # Parse: sample1 has 3 outputs, sample2 has 2 outputs
-                lines = stdout.splitlines()
-                
-                # Find boundaries by tracking which file we're reading
-                # Sample 1: /proc/{pid}/stat, /proc/{pid}/status, /proc/stat
-                # Sample 2: /proc/{pid}/stat, /proc/stat
-                
-                # First stat line (proc/{pid}/stat)
-                stat1_line = lines[0] if lines else ""
-                # First status line starts after stat1
-                status1_idx = 1
-                while status1_idx < len(lines) and not lines[status1_idx].startswith("Name:"):
-                    status1_idx += 1
-                
-                # First /proc/stat line
-                sys1_idx = status1_idx + 1
-                while sys1_idx < len(lines) and not lines[sys1_idx].startswith("cpu "):
-                    sys1_idx += 1
-                
-                # Second sample starts after "sleep 0.5" marker (no marker, so find next stat)
-                stat2_idx = sys1_idx + 1
-                while stat2_idx < len(lines) and not lines[stat2_idx].split()[0].isdigit():
-                    stat2_idx += 1
-                
-                # Second /proc/stat
-                sys2_idx = stat2_idx + 1
-                while sys2_idx < len(lines) and not lines[sys2_idx].startswith("cpu "):
-                    sys2_idx += 1
-                
-                # Extract values
-                if stat1_line:
-                    p1 = stat1_line.split()
-                    cpu1 = int(p1[13]) + int(p1[14])
-                
+            # Write all data to temp files via single su shell
+            M_Shell.exec(f"su -c 'cat /proc/{pid}/stat > {tmp}_s1 && cat /proc/{pid}/status > {tmp}_m && cat /proc/stat > {tmp}_c1 && sleep 0.5 && cat /proc/{pid}/stat > {tmp}_s2 && cat /proc/stat > {tmp}_c2'")
+            
+            # Read sample 1
+            with open(f"{tmp}_s1", "r") as f:
+                p1 = f.read().split()
+                cpu1 = int(p1[13]) + int(p1[14])
+            
+            with open(f"{tmp}_m", "r") as f:
                 mem_mb = 0.0
-                for i in range(status1_idx, min(status1_idx + 50, len(lines))):
-                    if lines[i].startswith("VmRSS:"):
-                        mem_mb = float(lines[i].split()[1]) / 1024.0
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        mem_mb = float(line.split()[1]) / 1024.0
                         break
-                
-                if sys1_idx < len(lines):
-                    s1 = list(map(int, lines[sys1_idx].split()[1:]))
-                    total1 = sum(s1)
-                
-                if stat2_idx < len(lines):
-                    p2 = lines[stat2_idx].split()
-                    cpu2 = int(p2[13]) + int(p2[14])
-                
-                if sys2_idx < len(lines):
-                    s2 = list(map(int, lines[sys2_idx].split()[1:]))
-                    total2 = sum(s2)
-                
-                delta_proc = cpu2 - cpu1
-                delta_total = total2 - total1
-                cpu_percent = 100.0 * (delta_proc / delta_total) if delta_total > 0 else 0.0
-                
-                return {
-                    "cpu": f"{cpu_percent:.1f}",
-                    "mem": f"{mem_mb:.1f}"
-                }
+            
+            with open(f"{tmp}_c1", "r") as f:
+                s1 = list(map(int, f.readline().split()[1:]))
+                total1 = sum(s1)
+            
+            # Read sample 2
+            with open(f"{tmp}_s2", "r") as f:
+                p2 = f.read().split()
+                cpu2 = int(p2[13]) + int(p2[14])
+            
+            with open(f"{tmp}_c2", "r") as f:
+                s2 = list(map(int, f.readline().split()[1:]))
+                total2 = sum(s2)
+            
+            delta_proc = cpu2 - cpu1
+            delta_total = total2 - total1
+            cpu_percent = 100.0 * (delta_proc / delta_total) if delta_total > 0 else 0.0
+            
+            return {
+                "cpu": f"{cpu_percent:.1f}",
+                "mem": f"{mem_mb:.1f}"
+            }
         except Exception:
             pass
         
