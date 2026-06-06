@@ -300,6 +300,54 @@ class M_Shell:
         return 1080, 1920  # Default fallback
     
     @staticmethod
+    def get_package_stats(package: str) -> dict:
+        """Get CPU and memory stats for a specific package process"""
+        # Get PID
+        stdout, _, code = M_Shell.exec(f"pidof {package}")
+        if code != 0 or not stdout.strip():
+            return {"cpu": "0.0", "mem": "0.0"}
+        
+        pid = stdout.strip().split()[0]
+        
+        # Memory: VmRSS from /proc/<pid>/status (kB -> MB)
+        mem_mb = 0.0
+        try:
+            with open(f"/proc/{pid}/status", "r") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        mem_mb = float(line.split()[1]) / 1024.0
+                        break
+        except:
+            pass
+        
+        # CPU: utime + stime from /proc/<pid>/stat
+        cpu_ticks = 0
+        try:
+            with open(f"/proc/{pid}/stat", "r") as f:
+                parts = f.read().split()
+                cpu_ticks = int(parts[13]) + int(parts[14])
+        except:
+            pass
+        
+        # Total system CPU ticks from /proc/stat
+        total_ticks = 0
+        try:
+            with open("/proc/stat", "r") as f:
+                parts = f.readline().split()[1:]
+                total_ticks = sum(int(x) for x in parts)
+        except:
+            pass
+        
+        cpu_percent = 0.0
+        if total_ticks > 0:
+            cpu_percent = 100.0 * (cpu_ticks / total_ticks)
+        
+        return {
+            "cpu": f"{cpu_percent:.1f}",
+            "mem": f"{mem_mb:.1f}"
+        }
+    
+    @staticmethod
     def has_root() -> bool:
         """Check if root is available (cached to avoid spam)"""
         if M_Shell._root_cached is not None:
@@ -517,7 +565,10 @@ class M_Config:
         "webhook": {
             "enabled": False,
             "url": "",
-            "events": ["startup", "crash", "restart", "shutdown"]
+            "events": ["startup", "crash", "restart", "shutdown", "status"],
+            "interval": 300,
+            "ping_everyone": False,
+            "screenshot": False
         },
         "launch_interval": 120,
         "launch_interval_random": False,
@@ -938,7 +989,7 @@ class M_Webhook:
     
     @staticmethod
     def send(event: str, instance: str, status: str, uptime: str) -> bool:
-        """Send webhook notification"""
+        """Send simple event webhook (startup/crash/restart/shutdown)"""
         config = M_Config.get()
         webhook = config.get("webhook", {})
         
@@ -948,23 +999,32 @@ class M_Webhook:
         if event not in webhook.get("events", []):
             return False
         
+        ping = "@everyone\n" if webhook.get("ping_everyone") else ""
+        embed = {
+            "title": "Noka Status",
+            "color": 0x00FFFF,
+            "fields": [
+                {"name": "Event", "value": event, "inline": True},
+                {"name": "Instance", "value": instance, "inline": True},
+                {"name": "Status", "value": status, "inline": True}
+            ],
+            "footer": {"text": "developed by 0eug ( silber )"}
+        }
+        
         data = {
-            "event": event,
-            "instance": instance,
-            "status": status,
-            "uptime": uptime,
-            "timestamp": datetime.now().isoformat(),
-            "hwid": M_Auth.get_hwid()
+            "content": ping,
+            "embeds": [embed]
         }
         
         try:
             response = requests.post(
                 webhook["url"],
                 json=data,
-                timeout=10
+                timeout=10,
+                headers={"User-Agent": "NOKA/2.0"}
             )
             
-            if response.status_code == 200:
+            if response.status_code in (200, 204):
                 M_Webhook.add_history(event, "sent")
                 M_Log.write("info", f"Webhook sent: {event}")
                 return True
@@ -975,6 +1035,108 @@ class M_Webhook:
         except Exception as e:
             M_Webhook.add_history(event, "failed")
             M_Log.write("error", f"Webhook failed: {event} - {e}")
+            return False
+    
+    @staticmethod
+    def capture_screenshot() -> bytes:
+        """Capture Android screen via screencap"""
+        try:
+            has_root = M_Shell.has_root()
+            if has_root:
+                _, _, code = M_Shell.exec("su -c 'screencap -p /data/local/tmp/noka_ss.png'")
+            else:
+                _, _, code = M_Shell.exec("screencap -p /data/local/tmp/noka_ss.png")
+            
+            if code == 0:
+                with open("/data/local/tmp/noka_ss.png", "rb") as f:
+                    return f.read()
+        except:
+            pass
+        return b""
+    
+    @staticmethod
+    def send_status_report() -> bool:
+        """Send periodic status report with CPU/RAM and per-package details"""
+        config = M_Config.get()
+        webhook = config.get("webhook", {})
+        
+        if not webhook.get("enabled") or not webhook.get("url"):
+            return False
+        
+        # Gather system stats
+        cpu, ram_used, ram_total = M_Shell.get_system_stats()
+        ram_left = ram_total - ram_used if ram_total > 0 else 0
+        
+        # Uptime
+        uptime_sec = 0
+        if M_Monitor.start_time:
+            uptime_sec = int(time.time() - M_Monitor.start_time)
+        uptime_str = M_Monitor.format_uptime(uptime_sec)
+        
+        # Per-package details with CPU & memory
+        details_lines = []
+        packages = M_Config.get("packages", [])
+        for pkg in packages:
+            if not pkg.get("enabled"):
+                continue
+            pkg_name = pkg.get("nickname", pkg["id"])
+            stats = M_Shell.get_package_stats(pkg["id"])
+            details_lines.append(f"{pkg_name} — CPU: {stats['cpu']}% MEM: {stats['mem']} MB")
+        
+        details_text = "\n".join(details_lines) if details_lines else "No active instances"
+        
+        # Build embed
+        ping = "@everyone\n" if webhook.get("ping_everyone") else ""
+        embed = {
+            "title": "Noka Status",
+            "color": 0x00FFFF,
+            "fields": [
+                {"name": "CPU Usage", "value": f"{cpu:.1f}%", "inline": True},
+                {"name": "Memory Used", "value": f"{ram_used:.2f} GB", "inline": True},
+                {"name": "Total Memory", "value": f"{ram_total:.2f} GB", "inline": True},
+                {"name": "Uptime", "value": uptime_str, "inline": True},
+                {"name": "Details", "value": f"```{details_text}```", "inline": False}
+            ],
+            "footer": {"text": "developed by 0eug ( silber )"}
+        }
+        
+        # Screenshot
+        screenshot_data = b""
+        if webhook.get("screenshot"):
+            screenshot_data = M_Webhook.capture_screenshot()
+        
+        try:
+            if screenshot_data:
+                import io
+                files = {
+                    "payload_json": (None, json.dumps({
+                        "content": ping,
+                        "embeds": [embed]
+                    }), "application/json"),
+                    "file": ("screenshot.png", io.BytesIO(screenshot_data), "image/png")
+                }
+                response = requests.post(webhook["url"], files=files, timeout=15)
+            else:
+                data = {
+                    "content": ping,
+                    "embeds": [embed]
+                }
+                response = requests.post(
+                    webhook["url"],
+                    json=data,
+                    timeout=10,
+                    headers={"User-Agent": "NOKA/2.0"}
+                )
+            
+            if response.status_code in (200, 204):
+                M_Webhook.add_history("status", "sent")
+                return True
+            else:
+                M_Webhook.add_history("status", "failed")
+                return False
+        except Exception as e:
+            M_Webhook.add_history("status", "failed")
+            M_Log.write("error", f"Status webhook failed: {e}")
             return False
     
     @staticmethod
@@ -1213,6 +1375,7 @@ class M_Dashboard:
         last_check = 0
         last_stats_render = time.time()
         last_auth_check = time.time()
+        last_webhook_send = time.time()
         
         try:
             # Track last known statuses to only render on change
@@ -1225,6 +1388,14 @@ class M_Dashboard:
                 if current_time - last_stats_render >= 2:
                     M_Dashboard.render_table()
                     last_stats_render = current_time
+                
+                # Periodic webhook status report
+                webhook = M_Config.get("webhook", {})
+                if webhook.get("enabled") and webhook.get("url"):
+                    interval = webhook.get("interval", 300)
+                    if interval > 0 and current_time - last_webhook_send >= interval:
+                        M_Webhook.send_status_report()
+                        last_webhook_send = current_time
                 
                 # Periodic license check (every 5 minutes)
                 if current_time - last_auth_check >= 300:
@@ -1504,17 +1675,32 @@ class MenuHandlers:
         
         webhook_url = M_UI.prompt("Webhook URL:")
         if webhook_url and "discord.com/api/webhooks" in webhook_url:
+            interval = M_UI.prompt("Webhook interval (seconds, default 300):")
+            try:
+                interval = int(interval) if interval else 300
+            except:
+                interval = 300
+            
+            ping = M_UI.confirm("Ping @everyone in webhook messages?")
+            screenshot = M_UI.confirm("Attach screenshots to status reports?")
+            
             M_Config.set("webhook", {
                 "enabled": True,
                 "url": webhook_url,
-                "events": ["startup", "crash", "restart", "shutdown"]
+                "events": ["startup", "crash", "restart", "shutdown", "status"],
+                "interval": interval,
+                "ping_everyone": ping,
+                "screenshot": screenshot
             })
             print("\n✓ Webhook configured")
         else:
             M_Config.set("webhook", {
                 "enabled": False,
                 "url": "",
-                "events": ["startup", "crash", "restart", "shutdown"]
+                "events": ["startup", "crash", "restart", "shutdown", "status"],
+                "interval": 300,
+                "ping_everyone": False,
+                "screenshot": False
             })
             print("\n✓ Webhook skipped")
         
@@ -1561,13 +1747,19 @@ class MenuHandlers:
             webhook = M_Config.get("webhook") or {"enabled": False, "url": ""}
             print(f"Current webhook: {M_Webhook.mask_url(webhook.get('url', ''))}")
             print(f"Status: {'Enabled' if webhook.get('enabled') else 'Disabled'}")
+            print(f"Interval: {webhook.get('interval', 300)}s")
+            print(f"Ping @everyone: {'Yes' if webhook.get('ping_everyone') else 'No'}")
+            print(f"Screenshots: {'Yes' if webhook.get('screenshot') else 'No'}")
             print()
             print("1) Change webhook URL")
             print("2) Toggle enabled/disabled")
-            print("3) Test webhook")
-            print("4) View webhook history")
-            print("5) Clear webhook")
-            print("6) Back")
+            print("3) Set interval")
+            print("4) Toggle @everyone ping")
+            print("5) Toggle screenshots")
+            print("6) Test webhook")
+            print("7) View webhook history")
+            print("8) Clear webhook")
+            print("9) Back")
             print()
             
             choice = M_UI.prompt("Choice:")
@@ -1588,14 +1780,33 @@ class MenuHandlers:
                 M_UI.success(f"Webhook {'enabled' if webhook['enabled'] else 'disabled'}")
                 M_UI.pause()
             elif choice == "3":
+                val = M_UI.prompt("Interval in seconds (default 300):")
+                try:
+                    webhook["interval"] = int(val) if val else 300
+                except:
+                    webhook["interval"] = 300
+                M_Config.set("webhook", webhook)
+                M_UI.success(f"Interval set to {webhook['interval']}s")
+                M_UI.pause()
+            elif choice == "4":
+                webhook["ping_everyone"] = not webhook.get("ping_everyone", False)
+                M_Config.set("webhook", webhook)
+                M_UI.success(f"@everyone ping {'enabled' if webhook['ping_everyone'] else 'disabled'}")
+                M_UI.pause()
+            elif choice == "5":
+                webhook["screenshot"] = not webhook.get("screenshot", False)
+                M_Config.set("webhook", webhook)
+                M_UI.success(f"Screenshots {'enabled' if webhook['screenshot'] else 'disabled'}")
+                M_UI.pause()
+            elif choice == "6":
                 print("Sending test webhook...")
-                ok = M_Webhook.send("test", "Test Instance", "Testing", "00:00:00")
+                ok = M_Webhook.send_status_report()
                 if ok:
                     M_UI.success("Test sent successfully")
                 else:
                     M_UI.error("Test failed - check webhook URL")
                 M_UI.pause()
-            elif choice == "4":
+            elif choice == "7":
                 print("\nWebhook History (last 10):")
                 for entry in M_Webhook.history[-10:]:
                     ts = entry.get("timestamp", "unknown")
@@ -1603,14 +1814,14 @@ class MenuHandlers:
                     event = entry.get("event", "unknown")
                     print(f"  [{ts}] {event}: {status}")
                 M_UI.pause()
-            elif choice == "5":
+            elif choice == "8":
                 if M_UI.confirm("Clear webhook URL?"):
                     webhook["url"] = ""
                     webhook["enabled"] = False
                     M_Config.set("webhook", webhook)
                     M_UI.success("Webhook cleared")
                 M_UI.pause()
-            elif choice == "6":
+            elif choice == "9":
                 break
     
     @staticmethod
