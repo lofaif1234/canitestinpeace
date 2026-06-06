@@ -17,7 +17,7 @@ import re
 import select
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Persistent root shell  (one grant toast, ever)
+# Persistent root shell
 # ──────────────────────────────────────────────────────────────────────────────
 class SuShell:
     _proc  = None
@@ -93,13 +93,13 @@ class SuShell:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Config — edit these to match your setup
+# Config
 # ──────────────────────────────────────────────────────────────────────────────
-PLACE_ID        = ""          # set your Roblox place ID here, e.g. "15376909"
-DELAY_BETWEEN   = 5           # seconds to wait between launching each instance
-STATUS_BAR_H    = 80          # Android status bar height in px
-NAV_BAR_H       = 0           # navigation bar height (0 if gesture nav)
-MARGIN          = 12          # gap between windows in px
+PLACE_ID        = ""
+DELAY_BETWEEN   = 5
+STATUS_BAR_H    = 80
+NAV_BAR_H       = 0
+MARGIN          = 12
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -118,21 +118,8 @@ def get_screen_size():
 # Layout calculator
 # ──────────────────────────────────────────────────────────────────────────────
 def compute_bounds(total: int):
-    """Return list of (left, top, right, bottom) tuples, one per instance."""
     W, H = get_screen_size()
     usable_h = H - STATUS_BAR_H - NAV_BAR_H
-
-    def row_bounds(cols, row_idx, rows, items_in_row, start_col=0):
-        cell_w = (W - MARGIN * (cols + 1)) // cols
-        cell_h = (usable_h - MARGIN * (rows + 1)) // rows
-        result = []
-        for col in range(items_in_row):
-            left   = MARGIN + col * (cell_w + MARGIN)
-            top    = STATUS_BAR_H + MARGIN + row_idx * (cell_h + MARGIN)
-            right  = left + cell_w
-            bottom = top + cell_h
-            result.append((left, top, right, bottom))
-        return result
 
     if total == 1:
         pad = 60
@@ -143,8 +130,8 @@ def compute_bounds(total: int):
         cell_h = usable_h - MARGIN * 2
         top = STATUS_BAR_H + MARGIN
         return [
-            (MARGIN,              top, MARGIN + cell_w,              top + cell_h),
-            (MARGIN * 2 + cell_w, top, MARGIN * 2 + cell_w * 2,     top + cell_h),
+            (MARGIN,              top, MARGIN + cell_w,          top + cell_h),
+            (MARGIN * 2 + cell_w, top, MARGIN * 2 + cell_w * 2, top + cell_h),
         ]
 
     if total <= 4:
@@ -162,20 +149,18 @@ def compute_bounds(total: int):
 
     top_count    = (total + 1) // 2
     bottom_count = total - top_count
-    top_cols = top_count
-    bot_cols = bottom_count
     top_h  = (usable_h - MARGIN * 3) * 2 // 5
     bot_h  = usable_h - top_h - MARGIN * 3
     bounds = []
 
     for col in range(top_count):
-        cell_w = (W - MARGIN * (top_cols + 1)) // top_cols
+        cell_w = (W - MARGIN * (top_count + 1)) // top_count
         left   = MARGIN + col * (cell_w + MARGIN)
         top    = STATUS_BAR_H + MARGIN
         bounds.append((left, top, left + cell_w, top + top_h))
 
     for col in range(bottom_count):
-        cell_w = (W - MARGIN * (bot_cols + 1)) // bot_cols
+        cell_w = (W - MARGIN * (bottom_count + 1)) // bottom_count
         left   = MARGIN + col * (cell_w + MARGIN)
         top    = STATUS_BAR_H + MARGIN * 2 + top_h
         bounds.append((left, top, left + cell_w, top + bot_h))
@@ -189,7 +174,6 @@ def compute_bounds(total: int):
 def find_roblox_packages():
     pkgs = []
 
-    # Method 1: pm list packages filtered directly (fastest)
     out = SuShell.run("pm list packages | grep -i roblox", timeout=15)
     print(f"  [DEBUG] pm list grep output: {repr(out[:300]) if out else '(empty)'}")
     for line in out.splitlines():
@@ -198,11 +182,9 @@ def find_roblox_packages():
             pkg = line.replace("package:", "").strip()
             if re.match(r'^com\.roblox\..+$', pkg, re.IGNORECASE):
                 pkgs.append(pkg)
-
     if pkgs:
         return pkgs
 
-    # Method 2: full pm list packages scan (in case grep isn't available)
     out2 = SuShell.run("pm list packages", timeout=20)
     print(f"  [DEBUG] pm list packages returned {len(out2.splitlines())} lines")
     for line in out2.splitlines():
@@ -211,11 +193,9 @@ def find_roblox_packages():
             pkg = line.replace("package:", "").strip()
             if re.match(r'^com\.roblox\..+$', pkg, re.IGNORECASE):
                 pkgs.append(pkg)
-
     if pkgs:
         return pkgs
 
-    # Method 3: pm list packages -3 (third-party only, sometimes more reliable)
     out3 = SuShell.run("pm list packages -3 | grep -i roblox", timeout=15)
     print(f"  [DEBUG] pm list -3 grep output: {repr(out3[:300]) if out3 else '(empty)'}")
     for line in out3.splitlines():
@@ -224,11 +204,9 @@ def find_roblox_packages():
             pkg = line.replace("package:", "").strip()
             if re.match(r'^com\.roblox\..+$', pkg, re.IGNORECASE):
                 pkgs.append(pkg)
-
     if pkgs:
         return pkgs
 
-    # Method 4: cmd package list packages (alternative on some ROMs)
     out4 = SuShell.run("cmd package list packages | grep -i roblox", timeout=15)
     print(f"  [DEBUG] cmd package list output: {repr(out4[:300]) if out4 else '(empty)'}")
     for line in out4.splitlines():
@@ -238,7 +216,7 @@ def find_roblox_packages():
             if re.match(r'^com\.roblox\..+$', pkg, re.IGNORECASE):
                 pkgs.append(pkg)
 
-    return list(dict.fromkeys(pkgs))  # deduplicate, preserve order
+    return list(dict.fromkeys(pkgs))
 
 
 def package_installed(pkg: str) -> bool:
@@ -247,35 +225,134 @@ def package_installed(pkg: str) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Launch + resize one instance
+# Get task ID for a package
+# ──────────────────────────────────────────────────────────────────────────────
+def get_task_id(pkg: str) -> str | None:
+    """Try multiple methods to find the task ID for a running package."""
+
+    # Method A: dumpsys activity tasks (modern Android)
+    out = SuShell.run("dumpsys activity tasks", timeout=10)
+    # Look for a task block that contains our package name
+    task_id = None
+    current_task = None
+    for line in out.splitlines():
+        m = re.search(r'Task[Id\s#=:]+(\d+)', line)
+        if m:
+            current_task = m.group(1)
+        if pkg in line and current_task:
+            task_id = current_task
+            break
+    if task_id:
+        print(f"  [DEBUG] Found task ID via dumpsys tasks: {task_id}")
+        return task_id
+
+    # Method B: dumpsys activity activities
+    out2 = SuShell.run("dumpsys activity activities", timeout=10)
+    current_task = None
+    for line in out2.splitlines():
+        m = re.search(r'taskId=(\d+)', line)
+        if m:
+            current_task = m.group(1)
+        if pkg in line and current_task:
+            task_id = current_task
+            break
+    if task_id:
+        print(f"  [DEBUG] Found task ID via dumpsys activities: {task_id}")
+        return task_id
+
+    # Method C: grep shortcut
+    out3 = SuShell.run(
+        f"dumpsys activity activities | grep -B10 '{pkg}' | grep 'taskId=' | tail -1",
+        timeout=10
+    )
+    m = re.search(r'taskId=(\d+)', out3)
+    if m:
+        print(f"  [DEBUG] Found task ID via grep: {m.group(1)}")
+        return m.group(1)
+
+    print(f"  [DEBUG] Could not find task ID for {pkg}")
+    return None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Resize a task into exact bounds
+# ──────────────────────────────────────────────────────────────────────────────
+def resize_task(pkg: str, left: int, top: int, right: int, bottom: int):
+    w = right - left
+    h = bottom - top
+    tid = get_task_id(pkg)
+
+    if tid:
+        # Try am task resize with explicit bounds (works on many freeform ROMs)
+        r1 = SuShell.run(
+            f"am task resize {tid} {left} {top} {right} {bottom}",
+            timeout=8
+        )
+        print(f"  [DEBUG] am task resize: {repr(r1[:100])}")
+
+        # Also try the older resize-task syntax
+        r2 = SuShell.run(
+            f"am resize-task {tid} {left} {top} {right} {bottom}",
+            timeout=8
+        )
+        print(f"  [DEBUG] am resize-task: {repr(r2[:100])}")
+
+        # wm stack resize targeting freeform stack (stack 5)
+        r3 = SuShell.run(
+            f"wm stack resize 5 {left} {top} {right} {bottom}",
+            timeout=8
+        )
+        print(f"  [DEBUG] wm stack resize: {repr(r3[:100])}")
+
+        # Move task into freeform stack then resize
+        r4 = SuShell.run(
+            f"am stack move-task {tid} 5 true",
+            timeout=8
+        )
+        print(f"  [DEBUG] am stack move-task: {repr(r4[:100])}")
+
+        r5 = SuShell.run(
+            f"wm stack resize 5 {left} {top} {right} {bottom}",
+            timeout=8
+        )
+        print(f"  [DEBUG] wm stack resize after move: {repr(r5[:100])}")
+
+    # Fallback: input swipe to drag the window (crude but works on some setups)
+    # This is a last-resort only — skipped unless nothing else works
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Launch one instance
 # ──────────────────────────────────────────────────────────────────────────────
 def launch_instance(pkg: str, place_id: str, bounds: tuple, index: int):
     left, top, right, bottom = bounds
-    width  = right - left
-    height = bottom - top
-    url    = f"roblox://placeId={place_id}"
-    tag    = f"[#{index}] {pkg}"
+    url = f"roblox://placeId={place_id}"
+    tag = f"[#{index}] {pkg}"
 
     print(f"  {tag} — stopping...")
     SuShell.run(f"am force-stop {pkg}", timeout=8)
     time.sleep(1)
 
     launched = False
+
+    # Attempt 1: launch directly into freeform with explicit bounds
     for mode in (5, 4):
         cmd = (
             f"am start -a android.intent.action.VIEW "
             f"-d \"{url}\" "
-            f"-f 0x10008000 "
             f"--windowingMode {mode} "
             f"--windowBounds {left},{top},{right},{bottom} "
-            f"{pkg}; echo __EXIT__$?"
+            f"-f 0x10008000 "
+            f"{pkg}"
         )
-        out = SuShell.run(cmd, timeout=15)
-        if any(l.strip() == "__EXIT__0" for l in out.splitlines()):
+        out = SuShell.run(cmd + "; echo __EXIT__$?", timeout=15)
+        print(f"  [DEBUG] launch mode {mode}: {repr(out[:200])}")
+        if "Error" not in out and "Exception" not in out:
             launched = True
             break
 
     if not launched:
+        # Attempt 2: plain launch, resize after
         SuShell.run(
             f"am start -a android.intent.action.VIEW -d \"{url}\" "
             f"-f 0x10008000 {pkg}",
@@ -284,40 +361,14 @@ def launch_instance(pkg: str, place_id: str, bounds: tuple, index: int):
         launched = True
 
     if launched:
-        print(f"  {tag} — launched, resizing in 4 s...")
-        time.sleep(4)
-        _resize(pkg, left, top, right, bottom)
+        print(f"  {tag} — launched, waiting 5s before resize...")
+        time.sleep(5)
+        resize_task(pkg, left, top, right, bottom)
         print(f"  {tag} — done  ({left},{top},{right},{bottom})")
     else:
         print(f"  {tag} — FAILED to launch")
 
     return launched
-
-
-def _resize(pkg: str, left: int, top: int, right: int, bottom: int):
-    w = right - left
-    h = bottom - top
-
-    out = SuShell.run(f"am resize-task -1 {w} {h}; echo __EXIT__$?", timeout=6)
-    if any(l.strip() == "__EXIT__0" for l in out.splitlines()):
-        return
-
-    dumpsys = SuShell.run(
-        f"dumpsys activity activities | grep -B5 {pkg} | grep taskId",
-        timeout=10,
-    )
-    m = re.search(r'taskId=(\d+)', dumpsys)
-    if m:
-        tid = m.group(1)
-        out = SuShell.run(f"am resize-task {tid} {w} {h}; echo __EXIT__$?", timeout=6)
-        if any(l.strip() == "__EXIT__0" for l in out.splitlines()):
-            return
-
-    SuShell.run(
-        f"wm stack move-task -1 5 true; "
-        f"wm stack resize 5 {left} {top} {right} {bottom}",
-        timeout=6,
-    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -328,7 +379,7 @@ def main():
 
     print("Requesting root access (one-time grant)...")
     if not SuShell.ok():
-        print("[ERROR] Root not available. Make sure Magisk/KernelSU is installed.")
+        print("[ERROR] Root not available.")
         sys.exit(1)
     print("[OK] Root shell ready.\n")
 
@@ -339,13 +390,11 @@ def main():
         print("Auto-detecting Roblox packages...")
         packages = find_roblox_packages()
         if not packages:
-            # Print all packages so user can see what's installed and pass manually
             print("[ERROR] No Roblox packages found (com.roblox.*)")
-            print("\n[INFO] Dumping ALL installed packages so you can identify yours:")
+            print("\n[INFO] All installed packages:")
             all_pkgs = SuShell.run("pm list packages", timeout=20)
-            print(all_pkgs if all_pkgs else "  (no output — root shell may have failed)")
-            print("\nTip: Run again with your package name as an argument:")
-            print("  python3 roblox_launch.py com.roblox.yourpackagename")
+            print(all_pkgs if all_pkgs else "  (no output)")
+            print("\nTip: python3 roblox_launch.py com.roblox.yourpackagename")
             SuShell.close()
             sys.exit(1)
         print(f"Found {len(packages)} package(s):")
@@ -365,7 +414,7 @@ def main():
     valid = [p for p in packages if package_installed(p)]
     skipped = set(packages) - set(valid)
     if skipped:
-        print(f"\n[WARN] Skipping not-installed packages: {skipped}")
+        print(f"\n[WARN] Skipping not-installed: {skipped}")
     if not valid:
         print("[ERROR] None of the packages are installed.")
         SuShell.close()
@@ -373,11 +422,15 @@ def main():
 
     packages = valid
     total    = len(packages)
-
     bounds_list = compute_bounds(total)
     W, H = get_screen_size()
+
     print(f"\nScreen: {W}x{H}")
     print(f"Launching {total} instance(s) in grid layout...\n")
+    print("Planned layout:")
+    for i, (b, p) in enumerate(zip(bounds_list, packages), 1):
+        print(f"  #{i} {p}: left={b[0]} top={b[1]} right={b[2]} bottom={b[3]}")
+    print()
 
     for i, (pkg, bounds) in enumerate(zip(packages, bounds_list), 1):
         launch_instance(pkg, place_id, bounds, i)
