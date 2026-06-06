@@ -3,6 +3,7 @@
 NOKA - Roblox Instance Manager v2.0 (Python Version)
 A complete Termux automation tool for managing multiple Roblox instances
 with crash detection, webhooks, and scheduling.
+BUILD: 20250606-1529
 """
 
 import os
@@ -268,7 +269,6 @@ class M_Shell:
             try:
                 with open('/proc/loadavg', 'r') as f:
                     load1 = float(f.read().split()[0])
-                # Count cores from /proc/cpuinfo
                 cores = 8
                 try:
                     with open('/proc/cpuinfo', 'r') as f:
@@ -281,26 +281,37 @@ class M_Shell:
         
         # --- RAM: /proc/meminfo read directly ---
         try:
-            meminfo = {}
+            meminfo_raw = ""
             with open('/proc/meminfo', 'r') as f:
-                for line in f:
-                    if ':' in line:
-                        key, val = line.split(':', 1)
-                        meminfo[key.strip()] = int(val.split()[0])
+                meminfo_raw = f.read()
+            
+            meminfo = {}
+            for line in meminfo_raw.splitlines():
+                if ':' in line:
+                    key, val = line.split(':', 1)
+                    # Strip any non-digit characters and get the first number
+                    digits = ''.join(c for c in val if c.isdigit())
+                    if digits:
+                        meminfo[key.strip()] = int(digits)
             
             total_raw = meminfo.get('MemTotal', 0)
             available_raw = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
             used_raw = total_raw - available_raw
             
-            if total_raw > 1000000000:
-                # Values reported in bytes despite kB label on some Android devices
+            # Android devices report in KB normally, but some report in bytes
+            # 16GB in KB = ~16,777,216; in bytes = ~17,179,869,184
+            if total_raw > 10000000000:  # > 10 billion = bytes
                 ram_total_gb = total_raw / (1024.0 ** 3)
                 ram_used_gb = used_raw / (1024.0 ** 3)
             else:
-                # Standard: values in KB
                 ram_total_gb = total_raw / (1024.0 ** 2)
                 ram_used_gb = used_raw / (1024.0 ** 2)
-        except Exception:
+            
+            # Safety clamp
+            if ram_total_gb > 1024:
+                ram_total_gb = total_raw / (1024.0 ** 3)
+                ram_used_gb = used_raw / (1024.0 ** 3)
+        except Exception as e:
             pass
         
         return cpu_percent, ram_used_gb, ram_total_gb
@@ -1292,31 +1303,41 @@ class M_Monitor:
         secs = seconds % 60
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     
+    _pid_cache = {}  # pkg_id -> (is_alive, timestamp)
+    
     @staticmethod
     def check_instance_status(pkg: Dict) -> Dict:
-        """Check if instance is still running"""
-        # Use root if available for better process detection
-        if M_Shell.has_root():
-            stdout, stderr, code = M_Shell.exec(f"su -c 'pidof {pkg['id']}'")
-        else:
-            stdout, stderr, code = M_Shell.exec(f"pidof {pkg['id']}")
+        """Check if instance is still running (cached to reduce su spam)"""
+        pkg_id = pkg["id"]
+        now = time.time()
         
-        if code == 0 and stdout.strip():
-            # Process exists
+        # Return cached result if < 5 seconds old
+        if pkg_id in M_Monitor._pid_cache:
+            is_alive, cached_time = M_Monitor._pid_cache[pkg_id]
+            if now - cached_time < 5:
+                if is_alive:
+                    uptime = 0
+                    if pkg_id in M_Monitor.instances:
+                        uptime = int(now - M_Monitor.instances[pkg_id]["start_time"])
+                    return {"status": "alive", "uptime": uptime}
+                else:
+                    return {"status": "crashed", "uptime": 0}
+        
+        # Try without su first (Termux can sometimes see app PIDs)
+        stdout, _, code = M_Shell.exec(f"pidof {pkg_id}")
+        if code != 0 and M_Shell.has_root():
+            stdout, _, code = M_Shell.exec(f"su -c 'pidof {pkg_id}'")
+        
+        is_alive = code == 0 and stdout.strip()
+        M_Monitor._pid_cache[pkg_id] = (is_alive, now)
+        
+        if is_alive:
             uptime = 0
-            if pkg["id"] in M_Monitor.instances:
-                uptime = int(time.time() - M_Monitor.instances[pkg["id"]]["start_time"])
-            
-            return {
-                "status": "alive",
-                "uptime": uptime
-            }
+            if pkg_id in M_Monitor.instances:
+                uptime = int(now - M_Monitor.instances[pkg_id]["start_time"])
+            return {"status": "alive", "uptime": uptime}
         else:
-            # Process not found
-            return {
-                "status": "crashed",
-                "uptime": 0
-            }
+            return {"status": "crashed", "uptime": 0}
 
 # =============================================================================
 # MODULE: M_Dashboard (Live Dashboard)
