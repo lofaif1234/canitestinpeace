@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 roblox_launch.py — Floating Roblox instance launcher
-Launches multiple Roblox packages as floating windows arranged in a grid.
-Requires root (Magisk/KernelSU).
+Android 10 with custom floating windows. Uses touch simulation to move/resize.
 
 Usage:
   python3 roblox_launch.py                        # auto-detect packages
@@ -32,7 +31,7 @@ class SuShell:
                 ["su"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,   # capture stderr too
+                stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
             )
@@ -96,14 +95,22 @@ class SuShell:
 # ──────────────────────────────────────────────────────────────────────────────
 PLACE_ID      = ""
 DELAY_BETWEEN = 5
-STATUS_BAR_H  = 80
-NAV_BAR_H     = 0
-MARGIN        = 12
-LAUNCH_WAIT   = 8   # seconds to wait for app to fully start before resizing
+STATUS_BAR_H  = 80        # px — Android status bar
+NAV_BAR_H     = 0         # px — set >0 if you have a nav bar
+MARGIN        = 12        # px — gap between windows
+LAUNCH_WAIT   = 15        # seconds to wait for app to appear in stack
+
+# Floating window chrome sizes (measure on your device if layout is off)
+# These describe the window decoration drawn by your ROM's floating window manager
+TITLEBAR_H    = 60        # height of the draggable title bar in px
+RESIZE_HANDLE = 30        # size of the corner resize handle in px
+
+# Touch swipe speed (ms). Lower = faster drag, but may miss on slow devices
+SWIPE_MS      = 400
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Screen detection
+# Screen
 # ──────────────────────────────────────────────────────────────────────────────
 def get_screen_size():
     out = SuShell.run("wm size", timeout=5)
@@ -169,14 +176,13 @@ def compute_bounds(total: int):
 # Package helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def find_roblox_packages():
-    pkgs = []
     for cmd in [
         "pm list packages | grep -i roblox",
         "pm list packages",
         "pm list packages -3",
-        "cmd package list packages | grep -i roblox",
     ]:
         out = SuShell.run(cmd, timeout=20)
+        pkgs = []
         for line in out.splitlines():
             line = line.strip()
             if line.startswith("package:"):
@@ -192,98 +198,137 @@ def package_installed(pkg: str) -> bool:
     return "package:" in SuShell.run(f"pm path {pkg}", timeout=8)
 
 
-def wait_for_launch(pkg: str, max_wait: int = 15) -> bool:
-    """Poll dumpsys until the package appears as a running activity."""
+def wait_for_launch(pkg: str, max_wait: int = LAUNCH_WAIT) -> bool:
     print(f"  Waiting for {pkg} to appear in activity stack", end="", flush=True)
     for _ in range(max_wait):
-        out = SuShell.run("dumpsys activity activities", timeout=5)
-        if pkg in out:
+        if pkg in SuShell.run("dumpsys activity activities", timeout=5):
             print(" ✓")
             return True
         print(".", end="", flush=True)
         time.sleep(1)
-    print(" (timed out)")
+    print(" (timed out, continuing anyway)")
     return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Task ID detection
+# Get current floating window bounds from dumpsys window
 # ──────────────────────────────────────────────────────────────────────────────
-def get_task_id(pkg: str) -> str | None:
-    # Grab the full activities dump and walk it line by line.
-    # We track the most-recently-seen taskId and check if pkg appears nearby.
-    out = SuShell.run("dumpsys activity activities", timeout=12)
-    lines = out.splitlines()
-    last_task = None
-    for i, line in enumerate(lines):
-        m = re.search(r'[Tt]ask[Id#\s=:]+(\d+)', line)
-        if m:
-            last_task = m.group(1)
-        if pkg in line and last_task:
-            print(f"  [DEBUG] Task ID for {pkg}: {last_task}")
-            return last_task
-
-    # Fallback: grep nearby lines around the package name
-    for i, line in enumerate(lines):
-        if pkg in line:
-            # search surrounding 20 lines for a taskId
-            window = lines[max(0, i-20):i+5]
-            for wl in reversed(window):
-                m = re.search(r'[Tt]ask[Id#\s=:]+(\d+)', wl)
-                if m:
-                    print(f"  [DEBUG] Task ID (window search) for {pkg}: {m.group(1)}")
-                    return m.group(1)
-
-    print(f"  [DEBUG] Could not find task ID for {pkg}")
+def get_window_bounds(pkg: str) -> tuple | None:
+    """
+    Returns (left, top, right, bottom) of the window's current frame,
+    or None if not found.
+    """
+    out = SuShell.run(f"dumpsys window windows | grep -A 30 '{pkg}'", timeout=10)
+    # Look for patterns like: mFrame=[0,0][1080,2244] or Frame: l=0 t=0 r=1080 b=2244
+    m = re.search(r'mFrame=\[(\d+),(\d+)\]\[(\d+),(\d+)\]', out)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+    m = re.search(r'Frames:.*?cont=\[(\d+),(\d+)\]\[(\d+),(\d+)\]', out)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+    # Try mContainingFrame
+    m = re.search(r'mContainingFrame=\[(\d+),(\d+)\]\[(\d+),(\d+)\]', out)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
     return None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Resize — try every known method
+# Touch-based move & resize
 # ──────────────────────────────────────────────────────────────────────────────
-def resize_task(pkg: str, left: int, top: int, right: int, bottom: int):
-    w = right - left
-    h = bottom - top
-    tid = get_task_id(pkg)
+def swipe(x1, y1, x2, y2, ms=SWIPE_MS):
+    """Simulate a finger drag from (x1,y1) to (x2,y2)."""
+    SuShell.run(f"input swipe {x1} {y1} {x2} {y2} {ms}", timeout=ms // 1000 + 5)
 
-    results = {}
 
-    if tid:
-        # 1. Modern: am task resize with bounds
-        results['am_task_resize'] = SuShell.run(
-            f"am task resize {tid} {left} {top} {right} {bottom}", timeout=8)
+def tap(x, y):
+    SuShell.run(f"input tap {x} {y}", timeout=5)
 
-        # 2. Move into freeform stack (5), then resize that stack
-        results['stack_move'] = SuShell.run(
-            f"am stack move-task {tid} 5 true", timeout=8)
-        results['stack_resize'] = SuShell.run(
-            f"wm stack resize 5 {left} {top} {right} {bottom}", timeout=8)
 
-        # 3. Legacy resize-task with just width/height
-        results['resize_wh'] = SuShell.run(
-            f"am resize-task {tid} {w} {h}", timeout=8)
+def move_window(cur_left, cur_top, cur_right, cur_bottom,
+                dst_left, dst_top):
+    """
+    Drag the title bar from its current centre to position the window
+    so its top-left lands at (dst_left, dst_top).
+    """
+    # Grab point = centre of title bar
+    grab_x = (cur_left + cur_right) // 2
+    grab_y = cur_top + TITLEBAR_H // 2
 
-        # 4. Legacy resize-task with full bounds
-        results['resize_bounds'] = SuShell.run(
-            f"am resize-task {tid} {left} {top} {right} {bottom}", timeout=8)
+    # Delta needed
+    dx = dst_left - cur_left
+    dy = dst_top  - cur_top
 
-    # 5. Resize the most-recent task (no task ID needed)
-    results['resize_last_wh'] = SuShell.run(
-        f"am resize-task -1 {w} {h}", timeout=8)
+    dst_x = grab_x + dx
+    dst_y = grab_y + dy
 
-    # 6. Resize freeform stack directly
-    results['wm_stack_5'] = SuShell.run(
-        f"wm stack resize 5 {left} {top} {right} {bottom}", timeout=8)
+    print(f"    move: drag ({grab_x},{grab_y}) → ({dst_x},{dst_y})")
+    swipe(grab_x, grab_y, dst_x, dst_y, ms=SWIPE_MS)
+    time.sleep(0.4)
 
-    for k, v in results.items():
-        if v.strip():
-            print(f"  [DEBUG] {k}: {repr(v.strip()[:120])}")
-        else:
-            print(f"  [DEBUG] {k}: (no output / ok)")
+
+def resize_window_touch(cur_left, cur_top, cur_right, cur_bottom,
+                        dst_right, dst_bottom):
+    """
+    Drag the bottom-right resize handle to hit (dst_right, dst_bottom).
+    """
+    # Handle is at the bottom-right corner of the window
+    handle_x = cur_right  - RESIZE_HANDLE // 2
+    handle_y = cur_bottom - RESIZE_HANDLE // 2
+
+    print(f"    resize: drag ({handle_x},{handle_y}) → ({dst_right},{dst_bottom})")
+    swipe(handle_x, handle_y, dst_right, dst_bottom, ms=SWIPE_MS * 2)
+    time.sleep(0.4)
+
+
+def position_window(pkg: str, dst_left: int, dst_top: int,
+                    dst_right: int, dst_bottom: int, attempt: int = 1):
+    """
+    Read the window's current bounds, then move + resize it to the target.
+    Retries up to 3 times if needed.
+    """
+    for try_n in range(1, 4):
+        bounds = get_window_bounds(pkg)
+        if bounds is None:
+            print(f"    [attempt {try_n}] Could not read window bounds, waiting...")
+            time.sleep(1)
+            continue
+
+        cur_l, cur_t, cur_r, cur_b = bounds
+        print(f"    [attempt {try_n}] Current: ({cur_l},{cur_t},{cur_r},{cur_b})")
+        print(f"    [attempt {try_n}] Target:  ({dst_left},{dst_top},{dst_right},{dst_bottom})")
+
+        # Step 1 — move (drag title bar to put top-left in right place)
+        if abs(cur_l - dst_left) > 5 or abs(cur_t - dst_top) > 5:
+            move_window(cur_l, cur_t, cur_r, cur_b, dst_left, dst_top)
+            time.sleep(0.5)
+            # Re-read after move
+            b2 = get_window_bounds(pkg)
+            if b2:
+                cur_l, cur_t, cur_r, cur_b = b2
+
+        # Step 2 — resize (drag bottom-right corner)
+        if abs(cur_r - dst_right) > 5 or abs(cur_b - dst_bottom) > 5:
+            resize_window_touch(cur_l, cur_t, cur_r, cur_b, dst_right, dst_bottom)
+            time.sleep(0.5)
+
+        # Verify
+        final = get_window_bounds(pkg)
+        if final:
+            fl, ft, fr, fb = final
+            ok = (abs(fl - dst_left)   < 20 and
+                  abs(ft - dst_top)    < 20 and
+                  abs(fr - dst_right)  < 20 and
+                  abs(fb - dst_bottom) < 20)
+            print(f"    [attempt {try_n}] Final: ({fl},{ft},{fr},{fb}) {'✓ OK' if ok else '✗ off-target, retrying'}")
+            if ok:
+                return True
+
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Launch one instance — plain am start, no windowing flags
+# Launch one instance
 # ──────────────────────────────────────────────────────────────────────────────
 def launch_instance(pkg: str, place_id: str, bounds: tuple, index: int):
     left, top, right, bottom = bounds
@@ -294,40 +339,32 @@ def launch_instance(pkg: str, place_id: str, bounds: tuple, index: int):
     SuShell.run(f"am force-stop {pkg}", timeout=8)
     time.sleep(1)
 
-    # Plain launch — no --windowingMode or --windowBounds (those broke it)
+    # Plain launch — let the app open in its default floating position
     out = SuShell.run(
         f"am start -a android.intent.action.VIEW -d \"{url}\" "
-        f"-f 0x10008000 {pkg}; echo __LAUNCH_EXIT__$?",
+        f"-f 0x10008000 {pkg}; echo __EXIT__$?",
         timeout=15,
     )
-    print(f"  [DEBUG] am start output: {repr(out[:200])}")
-
-    launched = "__LAUNCH_EXIT__0" in out or "Starting:" in out
-    if not launched:
-        # Try without the package name (let Android resolve the intent)
-        out2 = SuShell.run(
+    if "__EXIT__0" not in out and "Starting:" not in out:
+        # Fallback: let Android resolve intent without pinning package
+        SuShell.run(
             f"am start -a android.intent.action.VIEW -d \"{url}\" "
-            f"-f 0x10008000; echo __LAUNCH_EXIT__$?",
+            f"-f 0x10008000",
             timeout=15,
         )
-        print(f"  [DEBUG] am start (no pkg) output: {repr(out2[:200])}")
-        launched = "__LAUNCH_EXIT__0" in out2 or "Starting:" in out2
 
-    if not launched:
-        print(f"  {tag} — WARNING: launch may have failed, continuing anyway...")
+    # Wait for the activity to appear
+    wait_for_launch(pkg)
+    time.sleep(2)   # extra settle time
 
-    # Wait until the app actually appears in the activity stack
-    appeared = wait_for_launch(pkg, max_wait=LAUNCH_WAIT + 5)
-    if not appeared:
-        print(f"  {tag} — app did not appear in stack, skipping resize")
-        return False
+    # Now move & resize via touch
+    print(f"  {tag} — positioning to ({left},{top},{right},{bottom})...")
+    ok = position_window(pkg, left, top, right, bottom)
+    if ok:
+        print(f"  {tag} — ✓ positioned correctly")
+    else:
+        print(f"  {tag} — window positioned (verify visually)")
 
-    # Give it an extra second to settle
-    time.sleep(2)
-
-    print(f"  {tag} — resizing to ({left},{top},{right},{bottom})...")
-    resize_task(pkg, left, top, right, bottom)
-    print(f"  {tag} — done")
     return True
 
 
@@ -385,7 +422,7 @@ def main():
     print(f"Launching {total} instance(s)...\n")
     print("Planned layout:")
     for i, (b, p) in enumerate(zip(bounds_list, packages), 1):
-        print(f"  #{i} {p}: left={b[0]} top={b[1]} right={b[2]} bottom={b[3]}")
+        print(f"  #{i} {p}: ({b[0]},{b[1]}) → ({b[2]},{b[3]})")
     print()
 
     for i, (pkg, bounds) in enumerate(zip(packages, bounds_list), 1):
