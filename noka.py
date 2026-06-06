@@ -11,6 +11,7 @@ import sys
 import json
 import time
 import subprocess
+import signal
 import threading
 import requests
 import hashlib
@@ -19,7 +20,6 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
-import signal
 
 # =============================================================================
 # MODULE: M_UI (User Interface)
@@ -175,26 +175,50 @@ class M_Shell:
     """Shell command execution module"""
     
     _root_cached = None
+    _active_procs = []  # Track subprocesses for cleanup on exit
     
     @staticmethod
     def exec(cmd: str, timeout: int = 30) -> Tuple[str, str, int]:
         """Execute shell command with timeout"""
         try:
-            result = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
                 shell=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout
+                start_new_session=True
             )
-            # Strip carriage returns from Android shell output
-            stdout = result.stdout.replace('\r', '') if result.stdout else ""
-            stderr = result.stderr.replace('\r', '') if result.stderr else ""
-            return stdout, stderr, result.returncode
+            M_Shell._active_procs.append(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+                stdout = stdout.replace('\r', '') if stdout else ""
+                stderr = stderr.replace('\r', '') if stderr else ""
+                return stdout, stderr, proc.returncode
+            finally:
+                if proc in M_Shell._active_procs:
+                    M_Shell._active_procs.remove(proc)
         except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except:
+                pass
             return "", "Command timed out", 124
         except Exception as e:
             return "", str(e), 1
+    
+    @staticmethod
+    def cleanup():
+        """Kill all active subprocesses on exit"""
+        import signal
+        for proc in list(M_Shell._active_procs):
+            try:
+                proc.kill()
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except:
+                pass
+        M_Shell._active_procs.clear()
     
     @staticmethod
     def sanitize_input(input_str: str) -> str:
@@ -332,7 +356,7 @@ class M_Shell:
     
     @staticmethod
     def get_package_stats(package: str) -> dict:
-        """Get CPU and memory stats for a specific package process"""
+        """Get CPU and memory stats for a specific package process (no sleep inside su)"""
         import time
         
         # Get PID
@@ -344,8 +368,8 @@ class M_Shell:
         tmp = "/data/local/tmp/noka_stats"
         
         try:
-            # Write all data to temp files via single su shell
-            M_Shell.exec(f"su -c 'cat /proc/{pid}/stat > {tmp}_s1 && cat /proc/{pid}/status > {tmp}_m && cat /proc/stat > {tmp}_c1 && sleep 0.5 && cat /proc/{pid}/stat > {tmp}_s2 && cat /proc/stat > {tmp}_c2'")
+            # Sample 1: write to temp files (single su call, no sleep)
+            M_Shell.exec(f"su -c 'cat /proc/{pid}/stat > {tmp}_s1 && cat /proc/{pid}/status > {tmp}_m && cat /proc/stat > {tmp}_c1'")
             
             # Read sample 1
             with open(f"{tmp}_s1", "r") as f:
@@ -362,6 +386,12 @@ class M_Shell:
             with open(f"{tmp}_c1", "r") as f:
                 s1 = list(map(int, f.readline().split()[1:]))
                 total1 = sum(s1)
+            
+            # Python sleep (safe — no su process running here)
+            time.sleep(0.5)
+            
+            # Sample 2: write to temp files (single su call, no sleep)
+            M_Shell.exec(f"su -c 'cat /proc/{pid}/stat > {tmp}_s2 && cat /proc/stat > {tmp}_c2'")
             
             # Read sample 2
             with open(f"{tmp}_s2", "r") as f:
@@ -2028,6 +2058,7 @@ def check_requirements() -> bool:
 def signal_handler(signum, frame):
     """Handle shutdown signals"""
     print("\n\nShutting down...")
+    M_Shell.cleanup()  # Kill any lingering su/subprocess processes
     M_Monitor.stop_all()
     sys.exit(0)
 
