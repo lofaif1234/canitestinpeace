@@ -356,12 +356,20 @@ class M_Shell:
                         key, val = line.split(':', 1)
                         meminfo[key.strip()] = int(val.split()[0])
                 
-                total_kb = meminfo.get('MemTotal', 0)
-                available_kb = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
-                used_kb = total_kb - available_kb
+                total_raw = meminfo.get('MemTotal', 0)
+                available_raw = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
+                used_raw = total_raw - available_raw
                 
-                ram_total_gb = total_kb / 1024.0 / 1024.0
-                ram_used_gb = used_kb / 1024.0 / 1024.0
+                # Android devices may report in bytes (huge raw values) despite "kB" label
+                # A phone with 16GB RAM: in KB = ~16,777,216; in bytes = ~17,179,869,184
+                if total_raw > 1000000000:
+                    # Values are in bytes, divide by 1024^3 to get GB
+                    ram_total_gb = total_raw / 1024.0 / 1024.0 / 1024.0
+                    ram_used_gb = used_raw / 1024.0 / 1024.0 / 1024.0
+                else:
+                    # Standard Linux: values are in KB, divide by 1024^2 to get GB
+                    ram_total_gb = total_raw / 1024.0 / 1024.0
+                    ram_used_gb = used_raw / 1024.0 / 1024.0
         except Exception:
             pass
         
