@@ -234,34 +234,20 @@ class M_Shell:
     
     @staticmethod
     def get_system_stats():
-        """Get real CPU and RAM usage from /proc via root on Android"""
+        """Get real CPU and RAM usage from /proc via root on Android (batched to reduce su spam)"""
+        import re
         cpu_percent = 0.0
         ram_used_gb = 0.0
         ram_total_gb = 0.0
         
-        # Helper to read /proc file with root if available
-        def read_proc_file(path):
-            try:
-                if M_Shell.has_root():
-                    stdout, _, code = M_Shell.exec(f"su -c 'cat {path}'")
-                    if code == 0 and stdout:
-                        return stdout
-                with open(path, 'r') as f:
-                    return f.read()
-            except:
-                return ""
-        
-        # --- CPU Method 1: dumpsys cpuinfo (Android native, most accurate) ---
+        # --- CPU Method 1: dumpsys cpuinfo (single su call) ---
         try:
             stdout, _, code = M_Shell.exec("su -c 'dumpsys cpuinfo -c'")
             if code == 0 and stdout:
-                import re
-                # Look for "TOTAL: X%" or similar
                 total_match = re.search(r'TOTAL[:\s]+(\d+(?:\.\d+)?)\s*%', stdout, re.IGNORECASE)
                 if total_match:
                     cpu_percent = float(total_match.group(1))
                 else:
-                    # Some Android versions: "X% TOTAL" or "CPU: X% usr + Y% sys"
                     for line in stdout.splitlines():
                         if "usr" in line and "sys" in line:
                             nums = re.findall(r'(\d+(?:\.\d+)?)%', line)
@@ -276,43 +262,34 @@ class M_Shell:
         except Exception:
             pass
         
-        # --- CPU Method 2: /proc/stat delta ---
+        # --- CPU Method 2: /proc/stat delta (single su call for both reads) ---
         if cpu_percent == 0.0:
             try:
-                data1 = read_proc_file('/proc/stat')
-                if data1:
-                    fields1 = list(map(int, data1.splitlines()[0].split()[1:]))
-                    idle1 = fields1[3]
-                    total1 = sum(fields1)
-                    
-                    import time
-                    time.sleep(0.5)
-                    
-                    data2 = read_proc_file('/proc/stat')
-                    fields2 = list(map(int, data2.splitlines()[0].split()[1:]))
-                    idle2 = fields2[3]
-                    total2 = sum(fields2)
-                    
-                    total_diff = total2 - total1
-                    idle_diff = idle2 - idle1
-                    if total_diff > 0:
-                        cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
+                stdout, _, code = M_Shell.exec("su -c 'cat /proc/stat; sleep 0.5; cat /proc/stat'")
+                if code == 0 and stdout:
+                    lines = stdout.strip().splitlines()
+                    # Find the two "cpu " lines
+                    cpu_lines = [l for l in lines if l.startswith('cpu ')]
+                    if len(cpu_lines) >= 2:
+                        fields1 = list(map(int, cpu_lines[0].split()[1:]))
+                        fields2 = list(map(int, cpu_lines[1].split()[1:]))
+                        idle1, total1 = fields1[3], sum(fields1)
+                        idle2, total2 = fields2[3], sum(fields2)
+                        total_diff = total2 - total1
+                        idle_diff = idle2 - idle1
+                        if total_diff > 0:
+                            cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
             except Exception:
                 pass
         
-        # --- CPU Method 3: /proc/loadavg ---
+        # --- CPU Method 3: /proc/loadavg + /proc/cpuinfo (single su call) ---
         if cpu_percent == 0.0:
             try:
-                load_data = read_proc_file('/proc/loadavg')
-                if load_data:
-                    load1 = float(load_data.split()[0])
-                    # Get core count
-                    cores = 8  # default
-                    cpuinfo = read_proc_file('/proc/cpuinfo')
-                    if cpuinfo:
-                        core_count = cpuinfo.count("processor")
-                        if core_count > 0:
-                            cores = core_count
+                stdout, _, code = M_Shell.exec("su -c 'cat /proc/loadavg && cat /proc/cpuinfo'")
+                if code == 0 and stdout:
+                    parts = stdout.splitlines()[0].split()
+                    load1 = float(parts[0])
+                    cores = stdout.count("processor") or 8
                     cpu_percent = min(100.0, (load1 / cores) * 100.0)
             except Exception:
                 pass
@@ -336,7 +313,6 @@ class M_Shell:
             try:
                 stdout, _, code = M_Shell.exec("su -c 'top -n 1 -d 0'")
                 if code == 0 and stdout:
-                    import re
                     for line in stdout.splitlines():
                         if "User" in line and "System" in line and "%" in line:
                             matches = re.findall(r'(\d+)%', line)
@@ -346,12 +322,12 @@ class M_Shell:
             except Exception:
                 pass
         
-        # --- RAM: read /proc/meminfo ---
+        # --- RAM: read /proc/meminfo (single su call) ---
         try:
-            mem_data = read_proc_file('/proc/meminfo')
-            if mem_data:
+            stdout, _, code = M_Shell.exec("su -c 'cat /proc/meminfo'")
+            if code == 0 and stdout:
                 meminfo = {}
-                for line in mem_data.splitlines():
+                for line in stdout.splitlines():
                     if ':' in line:
                         key, val = line.split(':', 1)
                         meminfo[key.strip()] = int(val.split()[0])
@@ -360,14 +336,10 @@ class M_Shell:
                 available_raw = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
                 used_raw = total_raw - available_raw
                 
-                # Android devices may report in bytes (huge raw values) despite "kB" label
-                # A phone with 16GB RAM: in KB = ~16,777,216; in bytes = ~17,179,869,184
                 if total_raw > 1000000000:
-                    # Values are in bytes, divide by 1024^3 to get GB
                     ram_total_gb = total_raw / 1024.0 / 1024.0 / 1024.0
                     ram_used_gb = used_raw / 1024.0 / 1024.0 / 1024.0
                 else:
-                    # Standard Linux: values are in KB, divide by 1024^2 to get GB
                     ram_total_gb = total_raw / 1024.0 / 1024.0
                     ram_used_gb = used_raw / 1024.0 / 1024.0
         except Exception:
@@ -391,59 +363,88 @@ class M_Shell:
     
     @staticmethod
     def get_package_stats(package: str) -> dict:
-        """Get CPU and memory stats for a specific package process (requires root on Android)"""
-        # Always use root since Termux has root permissions
+        """Get CPU and memory stats for a specific package process (batched to reduce su spam)"""
+        # Get PID (single su call)
         stdout, _, code = M_Shell.exec(f"su -c 'pidof {package}'")
         if code != 0 or not stdout.strip():
             return {"cpu": "0.0", "mem": "0.0"}
         
         pid = stdout.strip().split()[0]
         
-        # Helper to read process stats
-        def read_proc(pid):
-            stat_out, _, stat_code = M_Shell.exec(f"su -c 'cat /proc/{pid}/stat'")
-            status_out, _, status_code = M_Shell.exec(f"su -c 'cat /proc/{pid}/status'")
-            sys_out, _, sys_code = M_Shell.exec("su -c 'cat /proc/stat'")
-            
-            p_cpu = 0
-            p_mem = 0.0
-            s_total = 0
-            
-            if stat_code == 0 and stat_out:
-                parts = stat_out.split()
-                p_cpu = int(parts[13]) + int(parts[14])
-            
-            if status_code == 0 and status_out:
-                for line in status_out.splitlines():
-                    if line.startswith("VmRSS:"):
-                        p_mem = float(line.split()[1]) / 1024.0
+        # Batch all reads into a single su call with sleep between samples
+        try:
+            cmd = (
+                f"su -c 'cat /proc/{pid}/stat && cat /proc/{pid}/status && cat /proc/stat; "
+                f"sleep 0.5; "
+                f"cat /proc/{pid}/stat && cat /proc/stat'"
+            )
+            stdout, _, code = M_Shell.exec(cmd)
+            if code == 0 and stdout:
+                sections = stdout.split('---NOKA_SPLIT---')
+                # Parse: sample1 has 3 outputs, sample2 has 2 outputs
+                lines = stdout.splitlines()
+                
+                # Find boundaries by tracking which file we're reading
+                # Sample 1: /proc/{pid}/stat, /proc/{pid}/status, /proc/stat
+                # Sample 2: /proc/{pid}/stat, /proc/stat
+                
+                # First stat line (proc/{pid}/stat)
+                stat1_line = lines[0] if lines else ""
+                # First status line starts after stat1
+                status1_idx = 1
+                while status1_idx < len(lines) and not lines[status1_idx].startswith("Name:"):
+                    status1_idx += 1
+                
+                # First /proc/stat line
+                sys1_idx = status1_idx + 1
+                while sys1_idx < len(lines) and not lines[sys1_idx].startswith("cpu "):
+                    sys1_idx += 1
+                
+                # Second sample starts after "sleep 0.5" marker (no marker, so find next stat)
+                stat2_idx = sys1_idx + 1
+                while stat2_idx < len(lines) and not lines[stat2_idx].split()[0].isdigit():
+                    stat2_idx += 1
+                
+                # Second /proc/stat
+                sys2_idx = stat2_idx + 1
+                while sys2_idx < len(lines) and not lines[sys2_idx].startswith("cpu "):
+                    sys2_idx += 1
+                
+                # Extract values
+                if stat1_line:
+                    p1 = stat1_line.split()
+                    cpu1 = int(p1[13]) + int(p1[14])
+                
+                mem_mb = 0.0
+                for i in range(status1_idx, min(status1_idx + 50, len(lines))):
+                    if lines[i].startswith("VmRSS:"):
+                        mem_mb = float(lines[i].split()[1]) / 1024.0
                         break
-            
-            if sys_code == 0 and sys_out:
-                parts = sys_out.splitlines()[0].split()[1:]
-                s_total = sum(int(x) for x in parts)
-            
-            return p_cpu, p_mem, s_total
+                
+                if sys1_idx < len(lines):
+                    s1 = list(map(int, lines[sys1_idx].split()[1:]))
+                    total1 = sum(s1)
+                
+                if stat2_idx < len(lines):
+                    p2 = lines[stat2_idx].split()
+                    cpu2 = int(p2[13]) + int(p2[14])
+                
+                if sys2_idx < len(lines):
+                    s2 = list(map(int, lines[sys2_idx].split()[1:]))
+                    total2 = sum(s2)
+                
+                delta_proc = cpu2 - cpu1
+                delta_total = total2 - total1
+                cpu_percent = 100.0 * (delta_proc / delta_total) if delta_total > 0 else 0.0
+                
+                return {
+                    "cpu": f"{cpu_percent:.1f}",
+                    "mem": f"{mem_mb:.1f}"
+                }
+        except Exception:
+            pass
         
-        # Sample 1
-        cpu1, mem, total1 = read_proc(pid)
-        
-        # Sample 2 after 0.5s
-        import time
-        time.sleep(0.5)
-        cpu2, _, total2 = read_proc(pid)
-        
-        # Calculate delta CPU %
-        cpu_percent = 0.0
-        delta_proc = cpu2 - cpu1
-        delta_total = total2 - total1
-        if delta_total > 0:
-            cpu_percent = 100.0 * (delta_proc / delta_total)
-        
-        return {
-            "cpu": f"{cpu_percent:.1f}",
-            "mem": f"{mem:.1f}"
-        }
+        return {"cpu": "0.0", "mem": "0.0"}
     
     @staticmethod
     def has_root() -> bool:
