@@ -22,96 +22,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 # =============================================================================
-# MODULE: M_SuShell (Persistent root shell — ONE su grant, zero toast spam)
-# =============================================================================
-class M_SuShell:
-    """Keeps a single long-lived 'su' process open.
-    Every root command is written to its stdin so Magisk/KernelSU only shows
-    the 'Termux was granted Superuser rights' toast ONCE at startup instead of
-    once per su invocation."""
-
-    _proc   = None
-    _lock   = threading.Lock()
-    _ready  = False
-    _FENCE  = "__NOKA_DONE__"
-
-    @classmethod
-    def _start(cls):
-        """Launch the persistent su shell (called once)."""
-        try:
-            cls._proc = subprocess.Popen(
-                ["su"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,  # suppress ALL grant banners
-                text=True,
-                bufsize=1,
-            )
-            out = cls._run_raw("echo alive", timeout=5)
-            cls._ready = "alive" in out
-        except Exception:
-            cls._proc  = None
-            cls._ready = False
-
-    @classmethod
-    def _run_raw(cls, cmd: str, timeout: float = 15) -> str:
-        """Send one command; collect output until sentinel line."""
-        if cls._proc is None or cls._proc.poll() is not None:
-            return ""
-        try:
-            cls._proc.stdin.write(f"{cmd}\necho {cls._FENCE}\n")
-            cls._proc.stdin.flush()
-            lines = []
-            import select as _select
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                ready, _, _ = _select.select([cls._proc.stdout], [], [], 0.1)
-                if ready:
-                    line = cls._proc.stdout.readline()
-                    if not line:
-                        break
-                    line = line.rstrip("\r\n")
-                    if line == cls._FENCE:
-                        break
-                    lines.append(line)
-            return "\n".join(lines)
-        except Exception:
-            return ""
-
-    @classmethod
-    def run(cls, cmd: str, timeout: float = 15) -> str:
-        """Run a shell command as root; return stdout. '' if root unavailable."""
-        with cls._lock:
-            if not cls._ready:
-                cls._start()
-            if not cls._ready:
-                return ""
-            return cls._run_raw(cmd, timeout=timeout)
-
-    @classmethod
-    def available(cls) -> bool:
-        """True if a working root shell is open."""
-        with cls._lock:
-            if not cls._ready:
-                cls._start()
-            return cls._ready
-
-    @classmethod
-    def close(cls):
-        """Shut down the persistent shell on program exit."""
-        try:
-            if cls._proc and cls._proc.poll() is None:
-                cls._proc.stdin.write("exit\n")
-                cls._proc.stdin.flush()
-                cls._proc.wait(timeout=2)
-        except Exception:
-            pass
-        finally:
-            cls._proc  = None
-            cls._ready = False
-
-
-# =============================================================================
 # MODULE: M_UI (User Interface)
 # =============================================================================
 class M_UI:
@@ -325,16 +235,15 @@ class M_Shell:
     def clear_app_cache(package: str) -> bool:
         """Clear only app cache files, NOT login data"""
         has_root = M_Shell.has_root()
-
+        
         # Method 1: Android builtin command (Android 8+)
         if has_root:
-            out = M_SuShell.run(f"cmd activity clear-app-cache {package}; echo __EXIT__$?", timeout=10)
-            code = 0 if any(l.strip() == "__EXIT__0" for l in out.splitlines()) else 1
+            _, _, code = M_Shell.exec(f"su -c 'cmd activity clear-app-cache {package}'")
         else:
             _, _, code = M_Shell.exec(f"cmd activity clear-app-cache {package}")
         if code == 0:
             return True
-
+        
         # Method 2: Delete only cache directory with root (preserves login)
         if has_root:
             cache_paths = [
@@ -343,218 +252,240 @@ class M_Shell:
                 f"/sdcard/Android/data/{package}/cache/*"
             ]
             for path in cache_paths:
-                M_SuShell.run(f"rm -rf {path}", timeout=10)
+                M_Shell.exec(f"su -c 'rm -rf {path}'")
             return True
-
+        
         return False
     
-    # Background CPU sampling state
-    _cpu_sample_lock    = threading.Lock()
-    _cpu_last_percent   = 0.0
-    _cpu_thread_started = False
-    _cpu_first_sample   = threading.Event()   # set when first result is ready
-
-    @staticmethod
-    def _sample_cpu_fields():
-        """Read /proc/stat aggregate CPU line; return list of int jiffie fields."""
-        try:
-            with open('/proc/stat', 'r') as f:
-                line = f.readline()
-            tokens = line.split()
-            if tokens and tokens[0].startswith('cpu'):
-                return list(map(int, tokens[1:]))
-        except Exception:
-            pass
-        return []
-
-    @staticmethod
-    def _update_cpu_background():
-        """Background daemon: keeps _cpu_last_percent fresh every ~1.5 s."""
-        while True:
-            try:
-                f1 = M_Shell._sample_cpu_fields()
-                time.sleep(1.0)
-                f2 = M_Shell._sample_cpu_fields()
-                if f1 and f2 and len(f1) == len(f2):
-                    total_diff = sum(f2) - sum(f1)
-                    idle_diff  = f2[3]  - f1[3]
-                    if total_diff > 0:
-                        pct = 100.0 * (1.0 - idle_diff / total_diff)
-                        with M_Shell._cpu_sample_lock:
-                            M_Shell._cpu_last_percent = round(pct, 1)
-                        M_Shell._cpu_first_sample.set()   # signal that data is ready
-            except Exception:
-                pass
-            time.sleep(0.5)
-
-    @staticmethod
-    def _ensure_cpu_thread():
-        """Start the background thread once and wait (max 2.5 s) for first sample."""
-        if M_Shell._cpu_thread_started:
-            return
-        M_Shell._cpu_thread_started = True
-        t = threading.Thread(target=M_Shell._update_cpu_background, daemon=True)
-        t.start()
-        # Block until the first real sample arrives (or 2.5 s timeout)
-        M_Shell._cpu_first_sample.wait(timeout=2.5)
-
     @staticmethod
     def get_system_stats():
-        """Get real CPU and RAM usage. CPU comes from a background sampler so
-        this call never blocks. RAM is read directly from /proc/meminfo."""
-        M_Shell._ensure_cpu_thread()
-
-        # --- CPU: from background thread cache ---
-        with M_Shell._cpu_sample_lock:
-            cpu_percent = M_Shell._cpu_last_percent
-
-        # --- RAM: /proc/meminfo (direct, no su needed) ---
-        ram_used_gb  = 0.0
+        """Get real CPU and RAM usage from /proc (direct read + su fallback)"""
+        import time
+        cpu_percent = 0.0
+        ram_used_gb = 0.0
         ram_total_gb = 0.0
+        
+        def read_proc_file(path):
+            """Try direct read first, fallback to su"""
+            try:
+                with open(path, 'r') as f:
+                    return f.read()
+            except:
+                try:
+                    stdout, _, code = M_Shell.exec(f"su -c 'cat {path}'")
+                    if code == 0:
+                        return stdout
+                except:
+                    pass
+            return ""
+        
+        # --- CPU: /proc/stat delta ---
         try:
+            data1 = read_proc_file('/proc/stat')
+            if data1:
+                fields1 = list(map(int, data1.splitlines()[0].split()[1:]))
+                idle1 = fields1[3]
+                total1 = sum(fields1)
+                
+                time.sleep(0.2)
+                
+                data2 = read_proc_file('/proc/stat')
+                fields2 = list(map(int, data2.splitlines()[0].split()[1:]))
+                idle2 = fields2[3]
+                total2 = sum(fields2)
+                
+                total_diff = total2 - total1
+                idle_diff = idle2 - idle1
+                if total_diff > 0:
+                    cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
+        except Exception:
+            pass
+        
+        # Fallback: /proc/loadavg
+        if cpu_percent == 0.0:
+            try:
+                load_data = read_proc_file('/proc/loadavg')
+                if load_data:
+                    load1 = float(load_data.split()[0])
+                    cores = 8
+                    cpuinfo = read_proc_file('/proc/cpuinfo')
+                    if cpuinfo:
+                        cores = cpuinfo.count("processor") or 8
+                    cpu_percent = min(100.0, (load1 / cores) * 100.0)
+            except Exception:
+                pass
+        
+        # --- RAM: /proc/meminfo read directly ---
+        try:
+            meminfo_raw = ""
             with open('/proc/meminfo', 'r') as f:
                 meminfo_raw = f.read()
+            
             meminfo = {}
             for line in meminfo_raw.splitlines():
                 if ':' in line:
                     key, val = line.split(':', 1)
+                    # Strip any non-digit characters and get the first number
                     digits = ''.join(c for c in val if c.isdigit())
                     if digits:
                         meminfo[key.strip()] = int(digits)
-
-            total_raw     = meminfo.get('MemTotal', 0)
+            
+            total_raw = meminfo.get('MemTotal', 0)
             available_raw = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
-            used_raw      = total_raw - available_raw
-
-            # /proc/meminfo values are in kB on every Android kernel
-            ram_total_gb = total_raw / (1024.0 ** 2)
-            ram_used_gb  = used_raw  / (1024.0 ** 2)
-
-            # Safety: if kernel reports in bytes instead of kB
+            used_raw = total_raw - available_raw
+            
+            # Android devices report in KB normally, but some report in bytes
+            # 16GB in KB = ~16,777,216; in bytes = ~17,179,869,184
+            if total_raw > 10000000000:  # > 10 billion = bytes
+                ram_total_gb = total_raw / (1024.0 ** 3)
+                ram_used_gb = used_raw / (1024.0 ** 3)
+            else:
+                ram_total_gb = total_raw / (1024.0 ** 2)
+                ram_used_gb = used_raw / (1024.0 ** 2)
+            
+            # Safety clamp
             if ram_total_gb > 1024:
                 ram_total_gb = total_raw / (1024.0 ** 3)
-                ram_used_gb  = used_raw  / (1024.0 ** 3)
-        except Exception:
+                ram_used_gb = used_raw / (1024.0 ** 3)
+        except Exception as e:
             pass
-
+        
         return cpu_percent, ram_used_gb, ram_total_gb
     
     @staticmethod
     def detect_screen_size():
         """Auto-detect screen size using wm size"""
         try:
-            if M_Shell.has_root():
-                stdout = M_SuShell.run("wm size", timeout=5)
-            else:
-                stdout, _, _ = M_Shell.exec("wm size")
-            if stdout:
-                match = re.search(r'(\d+)x(\d+)', stdout)
+            stdout, _, code = M_Shell.exec("su -c 'wm size'" if M_Shell.has_root() else "wm size")
+            if code == 0 and stdout:
+                # Parse output like "Physical size: 1080x1920"
+                match = __import__('re').search(r'(\d+)x(\d+)', stdout)
                 if match:
                     return int(match.group(1)), int(match.group(2))
-        except Exception:
+        except:
             pass
         return 1080, 1920  # Default fallback
     
     @staticmethod
     def get_package_stats(package: str) -> dict:
-        """Get CPU and memory stats for a specific package using the persistent root shell."""
-        if not M_SuShell.available():
+        """Get CPU and memory stats for a specific package process (no sleep inside su)"""
+        import time
+        
+        # Get PID
+        stdout, _, code = M_Shell.exec(f"su -c 'pidof {package}'")
+        if code != 0 or not stdout.strip():
             return {"cpu": "0.0", "mem": "0.0"}
-
-        # Get PID — take the first numeric token to skip any stray output
-        pid_out = M_SuShell.run(f"pidof {package}", timeout=5)
-        pid = next((t for t in pid_out.split() if t.isdigit()), "")
-        if not pid:
-            return {"cpu": "0.0", "mem": "0.0"}
-
+        
+        pid = stdout.strip().split()[0]
+        tmp = "/data/local/tmp/noka_stats"
+        
         try:
-            # Sample 1: proc/stat for this pid + global cpu in one shell line
-            raw1 = M_SuShell.run(f"cat /proc/{pid}/stat; echo ---; cat /proc/stat | head -1; echo ---; grep VmRSS /proc/{pid}/status", timeout=5)
-            sections1 = raw1.split("---")
-            if len(sections1) < 3:
-                return {"cpu": "0.0", "mem": "0.0"}
-
-            pstat1  = sections1[0].strip().split()
-            cpuraw1 = sections1[1].strip().split()
-            memraw1 = sections1[2].strip()
-
-            proc_jif1  = int(pstat1[13]) + int(pstat1[14])
-            total_jif1 = sum(map(int, cpuraw1[1:]))   # skip "cpu" label
-
-            mem_mb = 0.0
-            for line in memraw1.splitlines():
-                if "VmRSS" in line:
-                    mem_mb = float(line.split()[1]) / 1024.0
-                    break
-
+            # Sample 1: write to temp files (single su call, no sleep)
+            M_Shell.exec(f"su -c 'cat /proc/{pid}/stat > {tmp}_s1 && cat /proc/{pid}/status > {tmp}_m && cat /proc/stat > {tmp}_c1'")
+            
+            # Read sample 1
+            with open(f"{tmp}_s1", "r") as f:
+                p1 = f.read().split()
+                cpu1 = int(p1[13]) + int(p1[14])
+            
+            with open(f"{tmp}_m", "r") as f:
+                mem_mb = 0.0
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        mem_mb = float(line.split()[1]) / 1024.0
+                        break
+            
+            with open(f"{tmp}_c1", "r") as f:
+                s1 = list(map(int, f.readline().split()[1:]))
+                total1 = sum(s1)
+            
+            # Python sleep (safe — no su process running here)
             time.sleep(0.5)
-
-            # Sample 2
-            raw2 = M_SuShell.run(f"cat /proc/{pid}/stat; echo ---; cat /proc/stat | head -1", timeout=5)
-            sections2 = raw2.split("---")
-            if len(sections2) < 2:
-                return {"cpu": "0.0", "mem": "0.0"}
-
-            pstat2  = sections2[0].strip().split()
-            cpuraw2 = sections2[1].strip().split()
-
-            proc_jif2  = int(pstat2[13]) + int(pstat2[14])
-            total_jif2 = sum(map(int, cpuraw2[1:]))
-
-            delta_proc  = proc_jif2  - proc_jif1
-            delta_total = total_jif2 - total_jif1
-            cpu_pct = 100.0 * (delta_proc / delta_total) if delta_total > 0 else 0.0
-
-            return {"cpu": f"{cpu_pct:.1f}", "mem": f"{mem_mb:.1f}"}
+            
+            # Sample 2: write to temp files (single su call, no sleep)
+            M_Shell.exec(f"su -c 'cat /proc/{pid}/stat > {tmp}_s2 && cat /proc/stat > {tmp}_c2'")
+            
+            # Read sample 2
+            with open(f"{tmp}_s2", "r") as f:
+                p2 = f.read().split()
+                cpu2 = int(p2[13]) + int(p2[14])
+            
+            with open(f"{tmp}_c2", "r") as f:
+                s2 = list(map(int, f.readline().split()[1:]))
+                total2 = sum(s2)
+            
+            delta_proc = cpu2 - cpu1
+            delta_total = total2 - total1
+            cpu_percent = 100.0 * (delta_proc / delta_total) if delta_total > 0 else 0.0
+            
+            return {
+                "cpu": f"{cpu_percent:.1f}",
+                "mem": f"{mem_mb:.1f}"
+            }
         except Exception:
             pass
-
+        
         return {"cpu": "0.0", "mem": "0.0"}
     
     @staticmethod
     def has_root() -> bool:
-        """Check if root is available via the persistent su shell (cached, toast-free)."""
+        """Check if root is available (cached to avoid spam)"""
         if M_Shell._root_cached is not None:
             return M_Shell._root_cached
-        M_Shell._root_cached = M_SuShell.available()
-        return M_Shell._root_cached
+        try:
+            # Single check - trigger permission dialog once
+            stdout, _, code = M_Shell.exec("su -c 'echo root_ok'")
+            M_Shell._root_cached = code == 0 and "root_ok" in stdout
+            return M_Shell._root_cached
+        except:
+            M_Shell._root_cached = False
+            return False
     
     @staticmethod
     def resize_window_after_launch(package: str, bounds: str):
         """Resize window after launch using wm commands (requires root) - silent"""
         if not bounds:
             return
-
+        
+        # Wait for window to be created
         time.sleep(3)
-
+        
+        # Parse bounds
         try:
             left, top, right, bottom = map(int, bounds.split(','))
-            width  = right - left
+            width = right - left
             height = bottom - top
-        except Exception:
+        except:
             return
-
-        if not M_Shell.has_root():
+        
+        has_root = M_Shell.has_root()
+        if not has_root:
             return
-
+        
         # Method 1: Try am resize-task -1 (most recent task)
-        out = M_SuShell.run(f"am resize-task -1 {width} {height}; echo __EXIT__$?", timeout=5)
-        if any(l.strip() == "__EXIT__0" for l in out.splitlines()):
+        cmd = f"su -c 'am resize-task -1 {width} {height}'"
+        _, _, code = M_Shell.exec(cmd)
+        if code == 0:
             return
-
-        # Method 2: Find task ID from dumpsys
-        out = M_SuShell.run(
-            f"dumpsys activity activities | grep -B 2 {package} | grep taskId", timeout=10
-        )
-        match = re.search(r'taskId=(\d+)', out)
-        if match:
-            task_id = match.group(1)
-            res = M_SuShell.run(f"am resize-task {task_id} {width} {height}; echo __EXIT__$?", timeout=5)
-            if any(l.strip() == "__EXIT__0" for l in res.splitlines()):
-                return
-
-        # Method 3: wm stack resize
-        M_SuShell.run(f"wm stack id resize {left} {top} {right} {bottom}", timeout=5)
+        
+        # Method 2: Find task ID from dumpsys and resize specific task
+        cmd = f"su -c 'dumpsys activity activities | grep -B 2 {package} | grep taskId'"
+        stdout, _, code = M_Shell.exec(cmd)
+        if code == 0 and stdout:
+            import re
+            match = re.search(r'taskId=(\d+)', stdout)
+            if match:
+                task_id = match.group(1)
+                cmd = f"su -c 'am resize-task {task_id} {width} {height}'"
+                _, _, code = M_Shell.exec(cmd)
+                if code == 0:
+                    return
+        
+        # Method 3: Try wm stack resize
+        cmd = f"su -c 'wm stack id resize {left} {top} {right} {bottom}'"
+        _, _, code = M_Shell.exec(cmd)
+        if code == 0:
+            return
     
     @staticmethod
     def get_window_bounds(index: int, total: int = 1) -> str:
@@ -627,73 +558,73 @@ class M_Shell:
         if not package or not place_id:
             M_UI.error("Package and place_id required")
             return False
-
+        
         has_root = M_Shell.has_root()
-
+        
         # Step 1: Clear cache before launch
         M_UI.info("Clearing app cache...")
         M_Shell.clear_app_cache(package)
         time.sleep(1)
-
+        
         # Step 2: Force-stop to ensure clean start
         M_Shell.kill_app(package)
         time.sleep(1)
-
+        
         # Step 3: Check if package is installed
         M_UI.info("Checking package...")
         if has_root:
-            stdout = M_SuShell.run(f"pm path {package}", timeout=10)
+            stdout, _, code = M_Shell.exec(f"su -c 'pm path {package}'")
         else:
-            stdout, _, _ = M_Shell.exec(f"pm path {package}")
-
-        if not stdout or "package:" not in stdout:
+            stdout, _, code = M_Shell.exec(f"pm path {package}")
+        
+        if code != 0 or not stdout or "package:" not in stdout:
             M_UI.error(f"Package not installed: {package}")
             return False
-
+        
         url = f"roblox://placeId={place_id}"
-
-        # Build launch commands — root ones go through persistent shell, no new su spawn
-        def try_root_cmd(shell_cmd: str) -> bool:
-            # Run command, then echo exit code with a unique tag so we can find it
-            # among am start's multi-line output
-            out = M_SuShell.run(f"{shell_cmd}; echo __EXIT__$?", timeout=15)
-            for line in out.splitlines():
-                if line.startswith("__EXIT__"):
-                    return line.strip() == "__EXIT__0"
-            return False
-
-        def try_normal_cmd(shell_cmd: str) -> bool:
-            _, _, code = M_Shell.exec(shell_cmd)
-            return code == 0
-
+        
+        # Build commands with CLEAR_TASK flag so each instance is independent
+        # FLAG_ACTIVITY_NEW_TASK (0x10000000) + FLAG_ACTIVITY_CLEAR_TASK (0x00008000) = 0x10008000
         methods = []
-
+        
+        # Method 1: Freeform with bounds and clear-task
         if window_bounds:
-            methods.append((
-                f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 --windowingMode 5 --windowBounds {window_bounds} {package}",
-                "Freeform clear-task", has_root
-            ))
-            methods.append((
-                f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 --windowingMode 4 --windowBounds {window_bounds} {package}",
-                "Freeform alt mode", has_root
-            ))
-
-        methods.append((
-            f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 {package}",
-            "Standard clear-task", has_root
-        ))
-        methods.append((
-            f"am start -n {package}/com.roblox.client.Activity -f 0x10008000",
-            "Simple clear-task", has_root
-        ))
-
-        for shell_cmd, name, use_root in methods:
-            ok = try_root_cmd(shell_cmd) if use_root else try_normal_cmd(shell_cmd)
-            if ok:
+            if has_root:
+                cmd = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 --windowingMode 5 --windowBounds {window_bounds} {package}'"
+            else:
+                cmd = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 --windowingMode 5 --windowBounds {window_bounds} {package}"
+            methods.append({"name": "Freeform clear-task", "cmd": cmd})
+            
+            if has_root:
+                cmd2 = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 --windowingMode 4 --windowBounds {window_bounds} {package}'"
+            else:
+                cmd2 = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 --windowingMode 4 --windowBounds {window_bounds} {package}"
+            methods.append({"name": "Freeform alt mode", "cmd": cmd2})
+        
+        # Method 2: Standard with clear-task
+        if has_root:
+            cmd = f"su -c 'am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 {package}'"
+        else:
+            cmd = f"am start -a android.intent.action.VIEW -d \"{url}\" -f 0x10008000 {package}"
+        methods.append({"name": "Standard clear-task", "cmd": cmd})
+        
+        # Method 3: Simple component launch
+        if has_root:
+            cmd = f"su -c 'am start -n {package}/com.roblox.client.Activity -f 0x10008000'"
+        else:
+            cmd = f"am start -n {package}/com.roblox.client.Activity -f 0x10008000"
+        methods.append({"name": "Simple clear-task", "cmd": cmd})
+        
+        # Try each method silently (no prints - menu is the only output)
+        for i, method in enumerate(methods, 1):
+            stdout, stderr, code = M_Shell.exec(method['cmd'])
+            
+            if code == 0:
+                # Auto-resize after successful launch
                 if window_bounds:
                     M_Shell.resize_window_after_launch(package, window_bounds)
                 return True
-
+        
         return False
 
 # =============================================================================
@@ -1190,14 +1121,16 @@ class M_Webhook:
     def capture_screenshot() -> bytes:
         """Capture Android screen via screencap"""
         try:
-            ss_path = "/data/local/tmp/noka_ss.png"
-            if M_Shell.has_root():
-                M_SuShell.run(f"screencap -p {ss_path}", timeout=10)
+            has_root = M_Shell.has_root()
+            if has_root:
+                _, _, code = M_Shell.exec("su -c 'screencap -p /data/local/tmp/noka_ss.png'")
             else:
-                M_Shell.exec(f"screencap -p {ss_path}")
-            with open(ss_path, "rb") as f:
-                return f.read()
-        except Exception:
+                _, _, code = M_Shell.exec("screencap -p /data/local/tmp/noka_ss.png")
+            
+            if code == 0:
+                with open("/data/local/tmp/noka_ss.png", "rb") as f:
+                    return f.read()
+        except:
             pass
         return b""
     
@@ -1434,11 +1367,10 @@ class M_Monitor:
         
         # Try without su first (Termux can sometimes see app PIDs)
         stdout, _, code = M_Shell.exec(f"pidof {pkg_id}")
-        if code != 0 and M_SuShell.available():
-            out = M_SuShell.run(f"pidof {pkg_id}", timeout=5)
-            is_alive = bool(out.strip())
-        else:
-            is_alive = code == 0 and bool(stdout.strip())
+        if code != 0 and M_Shell.has_root():
+            stdout, _, code = M_Shell.exec(f"su -c 'pidof {pkg_id}'")
+        
+        is_alive = code == 0 and stdout.strip()
         M_Monitor._pid_cache[pkg_id] = (is_alive, now)
         
         if is_alive:
@@ -1644,16 +1576,34 @@ class MenuHandlers:
         if choice == "1":
             # Auto-detect Roblox packages
             print("\nScanning for Roblox packages...")
-
-            has_root = M_Shell.has_root()  # uses persistent shell, no new su spawn
-
+            
+            # Check for root access (common locations)
+            su_paths = ["/system/bin/su", "/system/xbin/su", "/sbin/su", "/su/bin/su"]
+            has_root = False
+            su_path = "su"
+            
+            for path in su_paths:
+                stdout, _, code = M_Shell.exec(f"test -f {path} && echo exists")
+                if code == 0 and "exists" in stdout:
+                    has_root = True
+                    su_path = path
+                    break
+            
+            if not has_root:
+                # Try which as fallback
+                root_stdout, _, root_code = M_Shell.exec("which su 2>/dev/null")
+                if root_code == 0 and root_stdout.strip():
+                    has_root = True
+                    su_path = "su"
+            
             if has_root:
                 print("[INFO] Root detected, using elevated permissions...")
-                raw = M_SuShell.run("pm list packages", timeout=15)
-                lines = [l for l in raw.split('\n') if 'roblox' in l.lower()]
-                stdout = '\n'.join(lines)
-                code   = 0 if raw else 1
-                stderr = ""
+                # Get all packages then filter in Python (avoid pipe issues)
+                stdout, stderr, code = M_Shell.exec(f"{su_path} -c 'pm list packages'")
+                if code == 0 and stdout:
+                    # Filter for roblox packages in Python
+                    lines = [line for line in stdout.split('\n') if 'roblox' in line.lower()]
+                    stdout = '\n'.join(lines)
             else:
                 stdout, stderr, code = M_Shell.exec("pm list packages | grep roblox")
             
@@ -2121,7 +2071,6 @@ def signal_handler(signum, frame):
     """Handle shutdown signals"""
     print("\n\nShutting down...")
     M_Shell.cleanup()  # Kill any lingering su/subprocess processes
-    M_SuShell.close()  # Close the persistent root shell
     M_Monitor.stop_all()
     sys.exit(0)
 
@@ -2150,23 +2099,16 @@ def main():
     """Main entry point"""
     # Fix terminal output mode (must run before any output)
     reset_terminal()
-
+    
     # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-
+    
     # Initialize modules
     M_Log.init()
     M_Config.load()
     M_Webhook.load_history()
-
-    # Open the persistent root shell NOW — Magisk shows the grant toast exactly
-    # once here, and never again for the rest of the session.
-    if M_SuShell.available():
-        M_Shell._root_cached = True   # prime the cache so has_root() never re-checks
-    else:
-        M_Shell._root_cached = False
-
+    
     # Authenticate
     try:
         auth_result = M_Auth.init()
@@ -2177,20 +2119,20 @@ def main():
         print(f"[ERROR] Auth system error: {e}")
         print("[ERROR] Check that config is valid JSON")
         sys.exit(1)
-
+    
     # Check debug flag
     debug_mode = "--debug" in sys.argv
     if debug_mode:
         print(M_UI.color('yellow', "DEBUG MODE ENABLED"))
-
+    
     # Check requirements
     check_requirements()
-
+    
     # Main menu loop
     running = True
     while running:
         choice = M_UI.main_menu()
-
+        
         if choice == "1":
             MenuHandlers.config_wizard()
         elif choice == "2":
@@ -2218,10 +2160,9 @@ def main():
         else:
             print(M_UI.color('red', "Invalid choice!"))
             time.sleep(1)
-
+    
     # Cleanup
     M_Monitor.stop_all()
-    M_SuShell.close()  # shut down the persistent root shell cleanly
 
 if __name__ == "__main__":
     main()
