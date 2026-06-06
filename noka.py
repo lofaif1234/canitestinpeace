@@ -259,97 +259,88 @@ class M_Shell:
     
     @staticmethod
     def get_system_stats():
-        """Get real CPU and RAM usage from /proc (direct read + su fallback)"""
-        import time
+        """Get real CPU and RAM usage from /proc (direct read only — no su, avoids grant-message spam)"""
         cpu_percent = 0.0
         ram_used_gb = 0.0
         ram_total_gb = 0.0
-        
-        def read_proc_file(path):
-            """Try direct read first, fallback to su"""
+
+        def read_proc_direct(path):
+            """Read a /proc file directly. Never falls back to su — su prepends
+            'Termux was granted superuser rights' into stdout which corrupts
+            numeric parsing and causes a superuser-prompt spam loop."""
             try:
                 with open(path, 'r') as f:
                     return f.read()
-            except:
-                try:
-                    stdout, _, code = M_Shell.exec(f"su -c 'cat {path}'")
-                    if code == 0:
-                        return stdout
-                except:
-                    pass
-            return ""
-        
-        # --- CPU: /proc/stat delta ---
+            except Exception:
+                return ""
+
+        # --- CPU: /proc/stat two-sample delta ---
         try:
-            data1 = read_proc_file('/proc/stat')
+            data1 = read_proc_direct('/proc/stat')
             if data1:
-                fields1 = list(map(int, data1.splitlines()[0].split()[1:]))
-                idle1 = fields1[3]
-                total1 = sum(fields1)
-                
-                time.sleep(0.2)
-                
-                data2 = read_proc_file('/proc/stat')
-                fields2 = list(map(int, data2.splitlines()[0].split()[1:]))
-                idle2 = fields2[3]
-                total2 = sum(fields2)
-                
-                total_diff = total2 - total1
-                idle_diff = idle2 - idle1
-                if total_diff > 0:
-                    cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
+                # First line is "cpu  ..." — skip the label token
+                tokens1 = data1.splitlines()[0].split()
+                if tokens1[0].startswith('cpu'):
+                    fields1 = list(map(int, tokens1[1:]))
+                    idle1   = fields1[3]
+                    total1  = sum(fields1)
+
+                    time.sleep(0.3)
+
+                    data2 = read_proc_direct('/proc/stat')
+                    tokens2 = data2.splitlines()[0].split()
+                    if tokens2[0].startswith('cpu'):
+                        fields2    = list(map(int, tokens2[1:]))
+                        idle2      = fields2[3]
+                        total2     = sum(fields2)
+                        total_diff = total2 - total1
+                        idle_diff  = idle2  - idle1
+                        if total_diff > 0:
+                            cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
         except Exception:
             pass
-        
-        # Fallback: /proc/loadavg
+
+        # Fallback: /proc/loadavg (no su, still safe to read directly)
         if cpu_percent == 0.0:
             try:
-                load_data = read_proc_file('/proc/loadavg')
+                load_data = read_proc_direct('/proc/loadavg')
                 if load_data:
                     load1 = float(load_data.split()[0])
                     cores = 8
-                    cpuinfo = read_proc_file('/proc/cpuinfo')
+                    cpuinfo = read_proc_direct('/proc/cpuinfo')
                     if cpuinfo:
-                        cores = cpuinfo.count("processor") or 8
+                        cores = max(1, cpuinfo.count("processor"))
                     cpu_percent = min(100.0, (load1 / cores) * 100.0)
             except Exception:
                 pass
-        
-        # --- RAM: /proc/meminfo read directly ---
+
+        # --- RAM: /proc/meminfo ---
         try:
-            meminfo_raw = ""
-            with open('/proc/meminfo', 'r') as f:
-                meminfo_raw = f.read()
-            
-            meminfo = {}
-            for line in meminfo_raw.splitlines():
-                if ':' in line:
-                    key, val = line.split(':', 1)
-                    # Strip any non-digit characters and get the first number
-                    digits = ''.join(c for c in val if c.isdigit())
-                    if digits:
-                        meminfo[key.strip()] = int(digits)
-            
-            total_raw = meminfo.get('MemTotal', 0)
-            available_raw = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
-            used_raw = total_raw - available_raw
-            
-            # Android devices report in KB normally, but some report in bytes
-            # 16GB in KB = ~16,777,216; in bytes = ~17,179,869,184
-            if total_raw > 10000000000:  # > 10 billion = bytes
-                ram_total_gb = total_raw / (1024.0 ** 3)
-                ram_used_gb = used_raw / (1024.0 ** 3)
-            else:
+            meminfo_raw = read_proc_direct('/proc/meminfo')
+            if meminfo_raw:
+                meminfo = {}
+                for line in meminfo_raw.splitlines():
+                    if ':' in line:
+                        key, val = line.split(':', 1)
+                        digits = ''.join(c for c in val if c.isdigit())
+                        if digits:
+                            meminfo[key.strip()] = int(digits)
+
+                total_raw     = meminfo.get('MemTotal', 0)
+                available_raw = meminfo.get('MemAvailable', meminfo.get('MemFree', 0))
+                used_raw      = total_raw - available_raw
+
+                # /proc/meminfo values are in kB on every Android kernel
                 ram_total_gb = total_raw / (1024.0 ** 2)
-                ram_used_gb = used_raw / (1024.0 ** 2)
-            
-            # Safety clamp
-            if ram_total_gb > 1024:
-                ram_total_gb = total_raw / (1024.0 ** 3)
-                ram_used_gb = used_raw / (1024.0 ** 3)
-        except Exception as e:
+                ram_used_gb  = used_raw  / (1024.0 ** 2)
+
+                # Safety: if something reported bytes instead of kB
+                if ram_total_gb > 1024:
+                    ram_total_gb = total_raw / (1024.0 ** 3)
+                    ram_used_gb  = used_raw  / (1024.0 ** 3)
+        except Exception:
             pass
-        
+
         return cpu_percent, ram_used_gb, ram_total_gb
     
     @staticmethod
@@ -369,75 +360,105 @@ class M_Shell:
     @staticmethod
     def get_package_stats(package: str) -> dict:
         """Get CPU and memory stats for a specific package process (no sleep inside su)"""
-        import time
-        
+
+        def su_read(path):
+            """Run su -c 'cat <path>' and strip any 'Termux was granted superuser
+            rights' header lines so callers always get clean proc content."""
+            stdout, _, code = M_Shell.exec(f"su -c 'cat {path}'")
+            if code != 0:
+                return ""
+            lines = []
+            for line in stdout.splitlines():
+                low = line.strip().lower()
+                # Drop Magisk / SuperSU / KernelSU grant-message lines
+                if ("superuser" in low or "granted" in low or
+                        "magisk" in low or "root" in low and len(line) < 60):
+                    continue
+                lines.append(line)
+            return "\n".join(lines)
+
         # Get PID
         stdout, _, code = M_Shell.exec(f"su -c 'pidof {package}'")
         if code != 0 or not stdout.strip():
             return {"cpu": "0.0", "mem": "0.0"}
-        
-        pid = stdout.strip().split()[0]
+
+        # pidof can also output grant lines — take only the first numeric token
+        pid = ""
+        for tok in stdout.split():
+            if tok.strip().isdigit():
+                pid = tok.strip()
+                break
+        if not pid:
+            return {"cpu": "0.0", "mem": "0.0"}
+
         tmp = "/data/local/tmp/noka_stats"
-        
+
         try:
             # Sample 1: write to temp files (single su call, no sleep)
             M_Shell.exec(f"su -c 'cat /proc/{pid}/stat > {tmp}_s1 && cat /proc/{pid}/status > {tmp}_m && cat /proc/stat > {tmp}_c1'")
-            
-            # Read sample 1
-            with open(f"{tmp}_s1", "r") as f:
-                p1 = f.read().split()
-                cpu1 = int(p1[13]) + int(p1[14])
-            
-            with open(f"{tmp}_m", "r") as f:
-                mem_mb = 0.0
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        mem_mb = float(line.split()[1]) / 1024.0
-                        break
-            
-            with open(f"{tmp}_c1", "r") as f:
-                s1 = list(map(int, f.readline().split()[1:]))
-                total1 = sum(s1)
-            
+
+            # Read sample 1 via su (guard against grant-message corruption)
+            s1_raw = su_read(f"{tmp}_s1")
+            p1 = s1_raw.split()
+            cpu1 = int(p1[13]) + int(p1[14])
+
+            mem_mb = 0.0
+            m_raw = su_read(f"{tmp}_m")
+            for line in m_raw.splitlines():
+                if line.startswith("VmRSS:"):
+                    mem_mb = float(line.split()[1]) / 1024.0
+                    break
+
+            c1_raw = su_read(f"{tmp}_c1")
+            s1 = list(map(int, c1_raw.splitlines()[0].split()[1:]))
+            total1 = sum(s1)
+
             # Python sleep (safe — no su process running here)
             time.sleep(0.5)
-            
+
             # Sample 2: write to temp files (single su call, no sleep)
             M_Shell.exec(f"su -c 'cat /proc/{pid}/stat > {tmp}_s2 && cat /proc/stat > {tmp}_c2'")
-            
+
             # Read sample 2
-            with open(f"{tmp}_s2", "r") as f:
-                p2 = f.read().split()
-                cpu2 = int(p2[13]) + int(p2[14])
-            
-            with open(f"{tmp}_c2", "r") as f:
-                s2 = list(map(int, f.readline().split()[1:]))
-                total2 = sum(s2)
-            
-            delta_proc = cpu2 - cpu1
+            s2_raw = su_read(f"{tmp}_s2")
+            p2 = s2_raw.split()
+            cpu2 = int(p2[13]) + int(p2[14])
+
+            c2_raw = su_read(f"{tmp}_c2")
+            s2 = list(map(int, c2_raw.splitlines()[0].split()[1:]))
+            total2 = sum(s2)
+
+            delta_proc  = cpu2 - cpu1
             delta_total = total2 - total1
             cpu_percent = 100.0 * (delta_proc / delta_total) if delta_total > 0 else 0.0
-            
+
             return {
                 "cpu": f"{cpu_percent:.1f}",
                 "mem": f"{mem_mb:.1f}"
             }
         except Exception:
             pass
-        
+
         return {"cpu": "0.0", "mem": "0.0"}
     
     @staticmethod
     def has_root() -> bool:
-        """Check if root is available (cached to avoid spam)"""
+        """Check if root is available (cached — asked only ONCE, never again).
+        Redirects stderr so the 'Termux was granted superuser rights' banner
+        from Magisk/KernelSU does not bleed into the terminal output."""
         if M_Shell._root_cached is not None:
             return M_Shell._root_cached
         try:
-            # Single check - trigger permission dialog once
-            stdout, _, code = M_Shell.exec("su -c 'echo root_ok'")
-            M_Shell._root_cached = code == 0 and "root_ok" in stdout
+            # Redirect stderr to /dev/null so the SU grant banner is suppressed
+            stdout, _, code = M_Shell.exec("su -c 'echo root_ok' 2>/dev/null")
+            # Strip any grant-message lines before checking the token
+            clean = " ".join(
+                line for line in stdout.splitlines()
+                if "root_ok" in line or (line.strip().isalnum() and len(line) < 20)
+            )
+            M_Shell._root_cached = code == 0 and "root_ok" in clean
             return M_Shell._root_cached
-        except:
+        except Exception:
             M_Shell._root_cached = False
             return False
     
