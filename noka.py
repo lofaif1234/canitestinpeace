@@ -301,50 +301,58 @@ class M_Shell:
     
     @staticmethod
     def get_package_stats(package: str) -> dict:
-        """Get CPU and memory stats for a specific package process"""
-        # Get PID
-        stdout, _, code = M_Shell.exec(f"pidof {package}")
+        """Get CPU and memory stats for a specific package process (requires root on Android)"""
+        # Always use root since Termux has root permissions
+        stdout, _, code = M_Shell.exec(f"su -c 'pidof {package}'")
         if code != 0 or not stdout.strip():
             return {"cpu": "0.0", "mem": "0.0"}
         
         pid = stdout.strip().split()[0]
         
-        # Memory: VmRSS from /proc/<pid>/status (kB -> MB)
-        mem_mb = 0.0
-        try:
-            with open(f"/proc/{pid}/status", "r") as f:
-                for line in f:
+        # Helper to read process stats
+        def read_proc(pid):
+            stat_out, _, stat_code = M_Shell.exec(f"su -c 'cat /proc/{pid}/stat'")
+            status_out, _, status_code = M_Shell.exec(f"su -c 'cat /proc/{pid}/status'")
+            sys_out, _, sys_code = M_Shell.exec("su -c 'cat /proc/stat'")
+            
+            p_cpu = 0
+            p_mem = 0.0
+            s_total = 0
+            
+            if stat_code == 0 and stat_out:
+                parts = stat_out.split()
+                p_cpu = int(parts[13]) + int(parts[14])
+            
+            if status_code == 0 and status_out:
+                for line in status_out.splitlines():
                     if line.startswith("VmRSS:"):
-                        mem_mb = float(line.split()[1]) / 1024.0
+                        p_mem = float(line.split()[1]) / 1024.0
                         break
-        except:
-            pass
+            
+            if sys_code == 0 and sys_out:
+                parts = sys_out.splitlines()[0].split()[1:]
+                s_total = sum(int(x) for x in parts)
+            
+            return p_cpu, p_mem, s_total
         
-        # CPU: utime + stime from /proc/<pid>/stat
-        cpu_ticks = 0
-        try:
-            with open(f"/proc/{pid}/stat", "r") as f:
-                parts = f.read().split()
-                cpu_ticks = int(parts[13]) + int(parts[14])
-        except:
-            pass
+        # Sample 1
+        cpu1, mem, total1 = read_proc(pid)
         
-        # Total system CPU ticks from /proc/stat
-        total_ticks = 0
-        try:
-            with open("/proc/stat", "r") as f:
-                parts = f.readline().split()[1:]
-                total_ticks = sum(int(x) for x in parts)
-        except:
-            pass
+        # Sample 2 after 0.5s
+        import time
+        time.sleep(0.5)
+        cpu2, _, total2 = read_proc(pid)
         
+        # Calculate delta CPU %
         cpu_percent = 0.0
-        if total_ticks > 0:
-            cpu_percent = 100.0 * (cpu_ticks / total_ticks)
+        delta_proc = cpu2 - cpu1
+        delta_total = total2 - total1
+        if delta_total > 0:
+            cpu_percent = 100.0 * (delta_proc / delta_total)
         
         return {
             "cpu": f"{cpu_percent:.1f}",
-            "mem": f"{mem_mb:.1f}"
+            "mem": f"{mem:.1f}"
         }
     
     @staticmethod
@@ -1104,6 +1112,10 @@ class M_Webhook:
         screenshot_data = b""
         if webhook.get("screenshot"):
             screenshot_data = M_Webhook.capture_screenshot()
+        
+        # Embed screenshot at bottom of embed if available
+        if screenshot_data:
+            embed["image"] = {"url": "attachment://screenshot.png"}
         
         try:
             if screenshot_data:
