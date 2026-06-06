@@ -251,28 +251,100 @@ class M_Shell:
             except:
                 return ""
         
-        # --- CPU: read /proc/stat twice with delay ---
+        # --- CPU Method 1: dumpsys cpuinfo (Android native, most accurate) ---
         try:
-            data1 = read_proc_file('/proc/stat')
-            if data1:
-                fields1 = list(map(int, data1.splitlines()[0].split()[1:]))
-                idle1 = fields1[3]
-                total1 = sum(fields1)
-                
-                import time
-                time.sleep(0.2)
-                
-                data2 = read_proc_file('/proc/stat')
-                fields2 = list(map(int, data2.splitlines()[0].split()[1:]))
-                idle2 = fields2[3]
-                total2 = sum(fields2)
-                
-                total_diff = total2 - total1
-                idle_diff = idle2 - idle1
-                if total_diff > 0:
-                    cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
+            stdout, _, code = M_Shell.exec("su -c 'dumpsys cpuinfo -c'")
+            if code == 0 and stdout:
+                import re
+                # Look for "TOTAL: X%" or similar
+                total_match = re.search(r'TOTAL[:\s]+(\d+(?:\.\d+)?)\s*%', stdout, re.IGNORECASE)
+                if total_match:
+                    cpu_percent = float(total_match.group(1))
+                else:
+                    # Some Android versions: "X% TOTAL" or "CPU: X% usr + Y% sys"
+                    for line in stdout.splitlines():
+                        if "usr" in line and "sys" in line:
+                            nums = re.findall(r'(\d+(?:\.\d+)?)%', line)
+                            if nums:
+                                cpu_percent = sum(float(n) for n in nums)
+                                break
+                        elif "TOTAL" in line:
+                            nums = re.findall(r'(\d+(?:\.\d+)?)%', line)
+                            if nums:
+                                cpu_percent = float(nums[-1])
+                                break
         except Exception:
             pass
+        
+        # --- CPU Method 2: /proc/stat delta ---
+        if cpu_percent == 0.0:
+            try:
+                data1 = read_proc_file('/proc/stat')
+                if data1:
+                    fields1 = list(map(int, data1.splitlines()[0].split()[1:]))
+                    idle1 = fields1[3]
+                    total1 = sum(fields1)
+                    
+                    import time
+                    time.sleep(0.5)
+                    
+                    data2 = read_proc_file('/proc/stat')
+                    fields2 = list(map(int, data2.splitlines()[0].split()[1:]))
+                    idle2 = fields2[3]
+                    total2 = sum(fields2)
+                    
+                    total_diff = total2 - total1
+                    idle_diff = idle2 - idle1
+                    if total_diff > 0:
+                        cpu_percent = 100.0 * (1.0 - idle_diff / total_diff)
+            except Exception:
+                pass
+        
+        # --- CPU Method 3: /proc/loadavg ---
+        if cpu_percent == 0.0:
+            try:
+                load_data = read_proc_file('/proc/loadavg')
+                if load_data:
+                    load1 = float(load_data.split()[0])
+                    # Get core count
+                    cores = 8  # default
+                    cpuinfo = read_proc_file('/proc/cpuinfo')
+                    if cpuinfo:
+                        core_count = cpuinfo.count("processor")
+                        if core_count > 0:
+                            cores = core_count
+                    cpu_percent = min(100.0, (load1 / cores) * 100.0)
+            except Exception:
+                pass
+        
+        # --- CPU Method 4: vmstat ---
+        if cpu_percent == 0.0:
+            try:
+                stdout, _, code = M_Shell.exec("su -c 'vmstat 1 2'")
+                if code == 0 and stdout:
+                    lines = stdout.strip().splitlines()
+                    if len(lines) >= 3:
+                        parts = lines[-1].split()
+                        if len(parts) >= 17:
+                            idle_val = int(parts[14])
+                            cpu_percent = max(0.0, 100.0 - idle_val)
+            except Exception:
+                pass
+        
+        # --- CPU Method 5: top ---
+        if cpu_percent == 0.0:
+            try:
+                stdout, _, code = M_Shell.exec("su -c 'top -n 1 -d 0'")
+                if code == 0 and stdout:
+                    import re
+                    for line in stdout.splitlines():
+                        if "User" in line and "System" in line and "%" in line:
+                            matches = re.findall(r'(\d+)%', line)
+                            if matches:
+                                cpu_percent = sum(int(m) for m in matches)
+                                break
+            except Exception:
+                pass
         
         # --- RAM: read /proc/meminfo ---
         try:
