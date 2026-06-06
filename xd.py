@@ -110,22 +110,12 @@ def get_screen_size():
     m = re.search(r'(\d+)x(\d+)', out)
     if m:
         w, h = int(m.group(1)), int(m.group(2))
-        # wm size may return portrait or landscape — ensure W < H for portrait
         return (min(w, h), max(w, h))
     return (1080, 1920)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Layout calculator
-# Mirrors the screenshot layout:
-#   n=1        → one big centred window
-#   n=2        → side by side, full height
-#   n=3        → 2 top + 1 bottom centred
-#   n=4        → 2×2 grid
-#   n=5        → 3 top + 2 bottom
-#   n=6        → 3 top + 3 bottom   (matches the screenshot exactly)
-#   n=7..9     → 3 top + up to 4 bottom (3-col each row)
-#   n=10..12   → 4 top + up to 5 bottom (4-col each row, smaller)
 # ──────────────────────────────────────────────────────────────────────────────
 def compute_bounds(total: int):
     """Return list of (left, top, right, bottom) tuples, one per instance."""
@@ -158,7 +148,6 @@ def compute_bounds(total: int):
         ]
 
     if total <= 4:
-        # 2 columns, up to 2 rows
         cols = 2
         rows = (total + 1) // 2
         bounds = []
@@ -171,26 +160,20 @@ def compute_bounds(total: int):
             bounds.append((left, top, left + cell_w, top + cell_h))
         return bounds
 
-    # 5+ instances: split into two rows
-    top_count    = (total + 1) // 2    # ceiling half → top row
+    top_count    = (total + 1) // 2
     bottom_count = total - top_count
-
     top_cols = top_count
     bot_cols = bottom_count
-
-    top_h  = (usable_h - MARGIN * 3) * 2 // 5   # top row ~40% of height
-    bot_h  = usable_h - top_h - MARGIN * 3       # bottom row ~60%
-
+    top_h  = (usable_h - MARGIN * 3) * 2 // 5
+    bot_h  = usable_h - top_h - MARGIN * 3
     bounds = []
 
-    # Top row
     for col in range(top_count):
         cell_w = (W - MARGIN * (top_cols + 1)) // top_cols
         left   = MARGIN + col * (cell_w + MARGIN)
         top    = STATUS_BAR_H + MARGIN
         bounds.append((left, top, left + cell_w, top + top_h))
 
-    # Bottom row
     for col in range(bottom_count):
         cell_w = (W - MARGIN * (bot_cols + 1)) // bot_cols
         left   = MARGIN + col * (cell_w + MARGIN)
@@ -204,17 +187,58 @@ def compute_bounds(total: int):
 # Package helpers
 # ──────────────────────────────────────────────────────────────────────────────
 def find_roblox_packages():
-    out = SuShell.run("pm list packages", timeout=15)
     pkgs = []
+
+    # Method 1: pm list packages filtered directly (fastest)
+    out = SuShell.run("pm list packages | grep -i roblox", timeout=15)
+    print(f"  [DEBUG] pm list grep output: {repr(out[:300]) if out else '(empty)'}")
     for line in out.splitlines():
         line = line.strip()
         if line.startswith("package:"):
             pkg = line.replace("package:", "").strip()
-            # Match com.roblox.<anything> — handles randomised suffixes like
-            # com.roblox.client, com.roblox.clienx, com.roblox.clixw, etc.
             if re.match(r'^com\.roblox\..+$', pkg, re.IGNORECASE):
                 pkgs.append(pkg)
-    return pkgs
+
+    if pkgs:
+        return pkgs
+
+    # Method 2: full pm list packages scan (in case grep isn't available)
+    out2 = SuShell.run("pm list packages", timeout=20)
+    print(f"  [DEBUG] pm list packages returned {len(out2.splitlines())} lines")
+    for line in out2.splitlines():
+        line = line.strip()
+        if line.startswith("package:"):
+            pkg = line.replace("package:", "").strip()
+            if re.match(r'^com\.roblox\..+$', pkg, re.IGNORECASE):
+                pkgs.append(pkg)
+
+    if pkgs:
+        return pkgs
+
+    # Method 3: pm list packages -3 (third-party only, sometimes more reliable)
+    out3 = SuShell.run("pm list packages -3 | grep -i roblox", timeout=15)
+    print(f"  [DEBUG] pm list -3 grep output: {repr(out3[:300]) if out3 else '(empty)'}")
+    for line in out3.splitlines():
+        line = line.strip()
+        if line.startswith("package:"):
+            pkg = line.replace("package:", "").strip()
+            if re.match(r'^com\.roblox\..+$', pkg, re.IGNORECASE):
+                pkgs.append(pkg)
+
+    if pkgs:
+        return pkgs
+
+    # Method 4: cmd package list packages (alternative on some ROMs)
+    out4 = SuShell.run("cmd package list packages | grep -i roblox", timeout=15)
+    print(f"  [DEBUG] cmd package list output: {repr(out4[:300]) if out4 else '(empty)'}")
+    for line in out4.splitlines():
+        line = line.strip()
+        if line.startswith("package:"):
+            pkg = line.replace("package:", "").strip()
+            if re.match(r'^com\.roblox\..+$', pkg, re.IGNORECASE):
+                pkgs.append(pkg)
+
+    return list(dict.fromkeys(pkgs))  # deduplicate, preserve order
 
 
 def package_installed(pkg: str) -> bool:
@@ -236,7 +260,6 @@ def launch_instance(pkg: str, place_id: str, bounds: tuple, index: int):
     SuShell.run(f"am force-stop {pkg}", timeout=8)
     time.sleep(1)
 
-    # Try freeform windowing modes (5 = freeform, 4 = multi-window)
     launched = False
     for mode in (5, 4):
         cmd = (
@@ -253,13 +276,12 @@ def launch_instance(pkg: str, place_id: str, bounds: tuple, index: int):
             break
 
     if not launched:
-        # Fallback: plain start, then resize manually
         SuShell.run(
             f"am start -a android.intent.action.VIEW -d \"{url}\" "
             f"-f 0x10008000 {pkg}",
             timeout=15,
         )
-        launched = True  # optimistic
+        launched = True
 
     if launched:
         print(f"  {tag} — launched, resizing in 4 s...")
@@ -276,12 +298,10 @@ def _resize(pkg: str, left: int, top: int, right: int, bottom: int):
     w = right - left
     h = bottom - top
 
-    # Method 1: resize most-recent task
     out = SuShell.run(f"am resize-task -1 {w} {h}; echo __EXIT__$?", timeout=6)
     if any(l.strip() == "__EXIT__0" for l in out.splitlines()):
         return
 
-    # Method 2: find task ID by package name and resize it
     dumpsys = SuShell.run(
         f"dumpsys activity activities | grep -B5 {pkg} | grep taskId",
         timeout=10,
@@ -293,7 +313,6 @@ def _resize(pkg: str, left: int, top: int, right: int, bottom: int):
         if any(l.strip() == "__EXIT__0" for l in out.splitlines()):
             return
 
-    # Method 3: wm stack move-task to freeform stack with bounds
     SuShell.run(
         f"wm stack move-task -1 5 true; "
         f"wm stack resize 5 {left} {top} {right} {bottom}",
@@ -307,14 +326,12 @@ def _resize(pkg: str, left: int, top: int, right: int, bottom: int):
 def main():
     print("=== Roblox Floating Launcher ===\n")
 
-    # ── Root check ──────────────────────────────────────────────────────────
     print("Requesting root access (one-time grant)...")
     if not SuShell.ok():
         print("[ERROR] Root not available. Make sure Magisk/KernelSU is installed.")
         sys.exit(1)
     print("[OK] Root shell ready.\n")
 
-    # ── Package list ────────────────────────────────────────────────────────
     if len(sys.argv) > 1:
         packages = sys.argv[1:]
         print(f"Using packages from arguments: {packages}")
@@ -322,7 +339,13 @@ def main():
         print("Auto-detecting Roblox packages...")
         packages = find_roblox_packages()
         if not packages:
-            print("[ERROR] No Roblox packages found. Install Roblox or pass package names as arguments.")
+            # Print all packages so user can see what's installed and pass manually
+            print("[ERROR] No Roblox packages found (com.roblox.*)")
+            print("\n[INFO] Dumping ALL installed packages so you can identify yours:")
+            all_pkgs = SuShell.run("pm list packages", timeout=20)
+            print(all_pkgs if all_pkgs else "  (no output — root shell may have failed)")
+            print("\nTip: Run again with your package name as an argument:")
+            print("  python3 roblox_launch.py com.roblox.yourpackagename")
             SuShell.close()
             sys.exit(1)
         print(f"Found {len(packages)} package(s):")
@@ -331,7 +354,6 @@ def main():
 
     print()
 
-    # ── Place ID ────────────────────────────────────────────────────────────
     place_id = PLACE_ID.strip()
     if not place_id:
         place_id = input("Enter Roblox Place ID (numbers only): ").strip()
@@ -340,7 +362,6 @@ def main():
         SuShell.close()
         sys.exit(1)
 
-    # ── Verify packages are installed ───────────────────────────────────────
     valid = [p for p in packages if package_installed(p)]
     skipped = set(packages) - set(valid)
     if skipped:
@@ -353,13 +374,11 @@ def main():
     packages = valid
     total    = len(packages)
 
-    # ── Compute layout ──────────────────────────────────────────────────────
     bounds_list = compute_bounds(total)
     W, H = get_screen_size()
     print(f"\nScreen: {W}x{H}")
     print(f"Launching {total} instance(s) in grid layout...\n")
 
-    # ── Launch each instance ────────────────────────────────────────────────
     for i, (pkg, bounds) in enumerate(zip(packages, bounds_list), 1):
         launch_instance(pkg, place_id, bounds, i)
         if i < total:
