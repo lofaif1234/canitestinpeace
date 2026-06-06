@@ -328,8 +328,8 @@ class M_Shell:
 
         # Method 1: Android builtin command (Android 8+)
         if has_root:
-            out = M_SuShell.run(f"cmd activity clear-app-cache {package}; echo $?", timeout=10)
-            code = 0 if out.strip().splitlines()[-1:] == ["0"] else 1
+            out = M_SuShell.run(f"cmd activity clear-app-cache {package}; echo __EXIT__$?", timeout=10)
+            code = 0 if any(l.strip() == "__EXIT__0" for l in out.splitlines()) else 1
         else:
             _, _, code = M_Shell.exec(f"cmd activity clear-app-cache {package}")
         if code == 0:
@@ -349,14 +349,14 @@ class M_Shell:
         return False
     
     # Background CPU sampling state
-    _cpu_sample_lock   = threading.Lock()
-    _cpu_last_percent  = 0.0
-    _cpu_last_sample   = 0.0   # epoch of last completed sample
-    _cpu_fields_prev: list = []
+    _cpu_sample_lock    = threading.Lock()
+    _cpu_last_percent   = 0.0
+    _cpu_thread_started = False
+    _cpu_first_sample   = threading.Event()   # set when first result is ready
 
     @staticmethod
     def _sample_cpu_fields():
-        """Read the first line of /proc/stat and return numeric fields (no label)."""
+        """Read /proc/stat aggregate CPU line; return list of int jiffie fields."""
         try:
             with open('/proc/stat', 'r') as f:
                 line = f.readline()
@@ -369,8 +369,7 @@ class M_Shell:
 
     @staticmethod
     def _update_cpu_background():
-        """Long-lived background thread: samples /proc/stat every second and
-        keeps _cpu_last_percent up to date without ever blocking the main thread."""
+        """Background daemon: keeps _cpu_last_percent fresh every ~1.5 s."""
         while True:
             try:
                 f1 = M_Shell._sample_cpu_fields()
@@ -378,28 +377,26 @@ class M_Shell:
                 f2 = M_Shell._sample_cpu_fields()
                 if f1 and f2 and len(f1) == len(f2):
                     total_diff = sum(f2) - sum(f1)
-                    idle_diff  = f2[3]   - f1[3]
+                    idle_diff  = f2[3]  - f1[3]
                     if total_diff > 0:
                         pct = 100.0 * (1.0 - idle_diff / total_diff)
                         with M_Shell._cpu_sample_lock:
                             M_Shell._cpu_last_percent = round(pct, 1)
-                            M_Shell._cpu_last_sample  = time.time()
+                        M_Shell._cpu_first_sample.set()   # signal that data is ready
             except Exception:
                 pass
-            time.sleep(0.5)   # pace between cycles
-
-    _cpu_thread_started = False
+            time.sleep(0.5)
 
     @staticmethod
     def _ensure_cpu_thread():
-        """Start the background CPU thread once."""
+        """Start the background thread once and wait (max 2.5 s) for first sample."""
         if M_Shell._cpu_thread_started:
             return
         M_Shell._cpu_thread_started = True
         t = threading.Thread(target=M_Shell._update_cpu_background, daemon=True)
         t.start()
-        # Give it one full cycle so the first render isn't always 0
-        time.sleep(1.2)
+        # Block until the first real sample arrives (or 2.5 s timeout)
+        M_Shell._cpu_first_sample.wait(timeout=2.5)
 
     @staticmethod
     def get_system_stats():
@@ -464,35 +461,28 @@ class M_Shell:
         if not M_SuShell.available():
             return {"cpu": "0.0", "mem": "0.0"}
 
-        # Get PID via persistent shell (no new su process spawned)
+        # Get PID — take the first numeric token to skip any stray output
         pid_out = M_SuShell.run(f"pidof {package}", timeout=5)
-        pid = ""
-        for tok in pid_out.split():
-            if tok.strip().isdigit():
-                pid = tok.strip()
-                break
+        pid = next((t for t in pid_out.split() if t.isdigit()), "")
         if not pid:
             return {"cpu": "0.0", "mem": "0.0"}
 
         try:
-            # Sample 1: read proc files in one shot via persistent shell
-            snap1 = M_SuShell.run(
-                f"cat /proc/{pid}/stat && echo '---STATUS---' && "
-                f"grep VmRSS /proc/{pid}/status && echo '---CPUSTAT---' && "
-                f"head -1 /proc/stat",
-                timeout=5
-            )
-            parts1  = snap1.split("---STATUS---")
-            stat1_s = parts1[0].strip().split() if parts1 else []
-            rest1   = parts1[1].split("---CPUSTAT---") if len(parts1) > 1 else ["", ""]
-            vmrss1  = rest1[0].strip()
-            cpu_s1  = rest1[1].strip().split()[1:] if len(rest1) > 1 else []
+            # Sample 1: proc/stat for this pid + global cpu in one shell line
+            raw1 = M_SuShell.run(f"cat /proc/{pid}/stat; echo ---; cat /proc/stat | head -1; echo ---; grep VmRSS /proc/{pid}/status", timeout=5)
+            sections1 = raw1.split("---")
+            if len(sections1) < 3:
+                return {"cpu": "0.0", "mem": "0.0"}
 
-            cpu1   = int(stat1_s[13]) + int(stat1_s[14])
-            total1 = sum(map(int, cpu_s1))
+            pstat1  = sections1[0].strip().split()
+            cpuraw1 = sections1[1].strip().split()
+            memraw1 = sections1[2].strip()
+
+            proc_jif1  = int(pstat1[13]) + int(pstat1[14])
+            total_jif1 = sum(map(int, cpuraw1[1:]))   # skip "cpu" label
 
             mem_mb = 0.0
-            for line in vmrss1.splitlines():
+            for line in memraw1.splitlines():
                 if "VmRSS" in line:
                     mem_mb = float(line.split()[1]) / 1024.0
                     break
@@ -500,25 +490,22 @@ class M_Shell:
             time.sleep(0.5)
 
             # Sample 2
-            snap2  = M_SuShell.run(
-                f"cat /proc/{pid}/stat && echo '---CPUSTAT---' && head -1 /proc/stat",
-                timeout=5
-            )
-            parts2  = snap2.split("---CPUSTAT---")
-            stat2_s = parts2[0].strip().split() if parts2 else []
-            cpu_s2  = parts2[1].strip().split()[1:] if len(parts2) > 1 else []
+            raw2 = M_SuShell.run(f"cat /proc/{pid}/stat; echo ---; cat /proc/stat | head -1", timeout=5)
+            sections2 = raw2.split("---")
+            if len(sections2) < 2:
+                return {"cpu": "0.0", "mem": "0.0"}
 
-            cpu2   = int(stat2_s[13]) + int(stat2_s[14])
-            total2 = sum(map(int, cpu_s2))
+            pstat2  = sections2[0].strip().split()
+            cpuraw2 = sections2[1].strip().split()
 
-            delta_proc  = cpu2  - cpu1
-            delta_total = total2 - total1
-            cpu_percent = 100.0 * (delta_proc / delta_total) if delta_total > 0 else 0.0
+            proc_jif2  = int(pstat2[13]) + int(pstat2[14])
+            total_jif2 = sum(map(int, cpuraw2[1:]))
 
-            return {
-                "cpu": f"{cpu_percent:.1f}",
-                "mem": f"{mem_mb:.1f}"
-            }
+            delta_proc  = proc_jif2  - proc_jif1
+            delta_total = total_jif2 - total_jif1
+            cpu_pct = 100.0 * (delta_proc / delta_total) if delta_total > 0 else 0.0
+
+            return {"cpu": f"{cpu_pct:.1f}", "mem": f"{mem_mb:.1f}"}
         except Exception:
             pass
 
@@ -551,8 +538,8 @@ class M_Shell:
             return
 
         # Method 1: Try am resize-task -1 (most recent task)
-        out = M_SuShell.run(f"am resize-task -1 {width} {height}; echo $?", timeout=5)
-        if out.strip().splitlines()[-1:] == ["0"]:
+        out = M_SuShell.run(f"am resize-task -1 {width} {height}; echo __EXIT__$?", timeout=5)
+        if any(l.strip() == "__EXIT__0" for l in out.splitlines()):
             return
 
         # Method 2: Find task ID from dumpsys
@@ -562,8 +549,8 @@ class M_Shell:
         match = re.search(r'taskId=(\d+)', out)
         if match:
             task_id = match.group(1)
-            res = M_SuShell.run(f"am resize-task {task_id} {width} {height}; echo $?", timeout=5)
-            if res.strip().splitlines()[-1:] == ["0"]:
+            res = M_SuShell.run(f"am resize-task {task_id} {width} {height}; echo __EXIT__$?", timeout=5)
+            if any(l.strip() == "__EXIT__0" for l in res.splitlines()):
                 return
 
         # Method 3: wm stack resize
@@ -667,8 +654,13 @@ class M_Shell:
 
         # Build launch commands — root ones go through persistent shell, no new su spawn
         def try_root_cmd(shell_cmd: str) -> bool:
-            out = M_SuShell.run(f"{shell_cmd}; echo $?", timeout=15)
-            return out.strip().splitlines()[-1:] == ["0"]
+            # Run command, then echo exit code with a unique tag so we can find it
+            # among am start's multi-line output
+            out = M_SuShell.run(f"{shell_cmd}; echo __EXIT__$?", timeout=15)
+            for line in out.splitlines():
+                if line.startswith("__EXIT__"):
+                    return line.strip() == "__EXIT__0"
+            return False
 
         def try_normal_cmd(shell_cmd: str) -> bool:
             _, _, code = M_Shell.exec(shell_cmd)
